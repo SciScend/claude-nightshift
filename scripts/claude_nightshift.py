@@ -200,11 +200,17 @@ def run(command, threshold, max_retries=10):
             logging.info(f"Stopped before retry: {_stop_reason}")
             return False
 
+        # Use -c for all runs after the very first one
         if first_run:
             cmd = command
             first_run = False
         else:
-            cmd = ["claude", "-c"]
+            resume_cmd = ["claude", "-c"]
+            if "--dangerously-skip-permissions" in command:
+                resume_cmd.append("--dangerously-skip-permissions")
+            if "-p" in command or "--print" in command:
+                resume_cmd.extend(["-p", "continue"])
+            cmd = resume_cmd
 
         logging.info(f"Running: {' '.join(cmd)}")
 
@@ -235,7 +241,9 @@ def run(command, threshold, max_retries=10):
                 print(line, end='', flush=True)
                 full_output.append(line)
 
-                if "usage limit reached" in line.lower():
+                # UPDATED: Catch more phrasing variants
+                low_line = line.lower()
+                if "usage limit reached" in low_line or "hit your limit" in low_line:
                     limit_reached = True
 
                 if limit_reached and not renewal_datetime:
@@ -249,19 +257,24 @@ def run(command, threshold, max_retries=10):
             logging.info(f"\n🛑 Stopped by watchdog: {_stop_reason}")
             return False
 
-        # Claude hit 5-hour limit
+        # UPDATED: If limit was reached, we IGNORE the exit code and wait
         if limit_reached:
             if not renewal_datetime:
+                # Try parsing the whole buffer if it wasn't on the specific "limit" line
                 renewal_datetime = parse_renewal_time("".join(full_output))
 
             if renewal_datetime:
                 now = datetime.datetime.now()
                 wait_seconds = max(0, (renewal_datetime - now).total_seconds()) + 30
+
+                # Dynamic log message based on what will actually run next
+                next_action = "claude -c" if not first_run else " ".join(command)
+                
                 logging.warning(
-                    f"5-hour limit reached. Resuming at {renewal_datetime} "
-                    f"(~{wait_seconds:.0f}s). Will resume with 'claude -c'."
+                    f"Limit reached. Resuming at {renewal_datetime} "
+                    f"(~{wait_seconds/60:.1f} minutes). Next: {next_action}"
                 )
-                # Sleep in small increments so we can react to watchdog stopping us
+                
                 end_time = time.time() + wait_seconds
                 while time.time() < end_time:
                     if should_stop():
@@ -269,13 +282,13 @@ def run(command, threshold, max_retries=10):
                         return False
                     time.sleep(5)
             else:
-                logging.error("Could not parse renewal time. Waiting 5 minutes.")
-                time.sleep(300)
+                logging.error("Could not parse renewal time. Waiting 10 minutes as fallback.")
+                time.sleep(600)
 
             retries += 1
             continue
 
-        # Normal exit
+        # Normal exit (Only if no limit was hit)
         if proc.returncode == 0:
             logging.info("✅ Task completed successfully.")
             return True
@@ -285,7 +298,6 @@ def run(command, threshold, max_retries=10):
 
     logging.error("Max retries reached.")
     return False
-
 
 # ---------------------------------------------------------------------------
 # Entry point
