@@ -202,14 +202,14 @@ def run(command, threshold, max_retries=10):
 
         # Use -c for all runs after the very first one
         if first_run:
-            cmd = command
+            cmd = list(command)
+            # Ensure autonomous flags are always present on the initial command
+            if "--dangerously-skip-permissions" not in cmd:
+                cmd.insert(1, "--dangerously-skip-permissions")
             first_run = False
         else:
-            resume_cmd = ["claude", "-c"]
-            if "--dangerously-skip-permissions" in command:
-                resume_cmd.append("--dangerously-skip-permissions")
-            if "-p" in command or "--print" in command:
-                resume_cmd.extend(["-p", "continue"])
+            resume_cmd = ["claude", "-c", "--dangerously-skip-permissions"]
+            resume_cmd.extend(["-p", "continue"])
             cmd = resume_cmd
 
         logging.info(f"Running: {' '.join(cmd)}")
@@ -217,6 +217,7 @@ def run(command, threshold, max_retries=10):
         try:
             proc = subprocess.Popen(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
