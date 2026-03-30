@@ -8,7 +8,7 @@ Runs a Claude Code task non-stop:
 
 Usage:
     python3 claude_nightshift.py [--threshold 70] [--interval 60] -- claude --dangerously-skip-permissions -p "your task"
-
+    // claude_nightshift --threshold 85 --interval 60 -- claude --dangerously-skip-permissions -c -p "continue"
 Arguments:
     --threshold   7-day usage % at which to stop (default: 70)
     --interval    How often in seconds to check 7-day usage (default: 60)
