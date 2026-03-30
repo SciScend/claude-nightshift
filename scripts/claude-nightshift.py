@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-claude-nightshift.py
+claude-nightshift — run Claude Code tasks autonomously until done.
 
-Runs a Claude Code task fully autonomously and non-stop until completion or until hitting a 7-day usage threshold:
-- Auto-resumes after 5-hour session limit (using `claude -c -p "continue"`)
-- Stops automatically if 7-day usage hits the threshold (default 70%)
-- Always forces --dangerously-skip-permissions (added if missing)
-- Closes stdin so Claude never blocks waiting for input
+Auto-resumes after 5-hour session limits, stops when 7-day usage hits threshold.
 
 Usage:
-    claude-nightshift [options] -- claude -p "your task"
-    claude-nightshift --threshold 85 -- claude -p "refactor the auth module"
-    claude-nightshift --threshold 90 --interval 120 -- claude -p "fix all lint errors"
+    claude-nightshift "your task"
+    claude-nightshift -t 85 "refactor the auth module"
+    claude-nightshift -t 90 -i 120 --model opus "fix all lint errors"
+    claude-nightshift --resume                     # resume last session
+    claude-nightshift -l "some task"                 # log output to nightshift_*.log
+    claude-nightshift --log-file run.log "some task" # log output to specific file
+    claude-nightshift --dry-run "some task"          # preview command without running
 
-Options:
-    --threshold   7-day usage % at which to stop (default: 70)
-    --interval    Seconds between 7-day usage checks (default: 60)
-    --            Separator; everything after this is the claude command
+Advanced (full control over claude args):
+    claude-nightshift -- claude -p "task" --model opus --allowedTools Edit,Write
 
 Notes:
-    - --dangerously-skip-permissions is added automatically; no need to include it
-    - On resume, the script runs: claude -c --dangerously-skip-permissions -p "continue"
+    - --dangerously-skip-permissions is always added automatically
+    - On resume: claude -c --dangerously-skip-permissions -p "continue"
     - Requires `npx cclimits --claude` for 7-day usage monitoring
 """
 
@@ -30,15 +28,38 @@ import re
 import time
 import datetime
 import logging
-import os
 import threading
 import argparse
 import signal
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logger = logging.getLogger(__name__)
+
+# Will be set to an open file handle when --log is used, else None
+_log_file = None
+
+
+def setup_logging(log_path=None):
+    """Configure logging to stderr, and optionally also to a file."""
+    global _log_file
+    fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(fmt)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    if log_path:
+        _log_file = open(log_path, "a", buffering=1)  # line-buffered
+        fh = logging.StreamHandler(_log_file)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+
+def log_output(line):
+    """Write a Claude output line to the log file (if open)."""
+    if _log_file:
+        _log_file.write(line)
+        _log_file.flush()
 
 # Shared state between main thread and watchdog thread
 _lock = threading.Lock()
@@ -150,7 +171,7 @@ def watchdog_thread(threshold, interval):
     Runs in background. Checks 7-day usage every `interval` seconds.
     If usage >= threshold, kills the current claude process and sets stop flag.
     """
-    logging.info(f"[watchdog] Started — threshold={threshold}%, interval={interval}s")
+    logger.info(f"[watchdog] Started — threshold={threshold}%, interval={interval}s")
 
     while True:
         time.sleep(interval)
@@ -167,20 +188,20 @@ def watchdog_thread(threshold, interval):
             )
             output = result.stdout + result.stderr
         except Exception as e:
-            logging.warning(f"[watchdog] cclimits error: {e}")
+            logger.warning(f"[watchdog] cclimits error: {e}")
             continue
 
         used = parse_7day_usage(output)
 
         if used is None:
-            logging.warning("[watchdog] Could not parse 7-day usage from cclimits output")
+            logger.warning("[watchdog] Could not parse 7-day usage from cclimits output")
             continue
 
-        logging.info(f"[watchdog] 7-day usage: {used}%")
+        logger.info(f"[watchdog] 7-day usage: {used}%")
 
         if used >= threshold:
             reason = f"7-day usage {used}% reached threshold {threshold}%"
-            logging.warning(f"[watchdog] 🛑 {reason} — stopping Claude")
+            logger.warning(f"[watchdog] 🛑 {reason} — stopping Claude")
             set_stop(reason)
 
             proc = get_current_process()
@@ -193,7 +214,7 @@ def watchdog_thread(threshold, interval):
 
             break
 
-    logging.info("[watchdog] Exited")
+    logger.info("[watchdog] Exited")
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +227,7 @@ def run(command, threshold, max_retries=10):
 
     while retries < max_retries:
         if should_stop():
-            logging.info(f"Stopped before retry: {_stop_reason}")
+            logger.info(f"Stopped before retry: {_stop_reason}")
             return False
 
         # Use -c for all runs after the very first one
@@ -221,7 +242,7 @@ def run(command, threshold, max_retries=10):
             resume_cmd.extend(["-p", "continue"])
             cmd = resume_cmd
 
-        logging.info(f"Running: {' '.join(cmd)}")
+        logger.info(f"Running: {' '.join(cmd)}")
 
         try:
             proc = subprocess.Popen(
@@ -234,7 +255,7 @@ def run(command, threshold, max_retries=10):
                 universal_newlines=True
             )
         except FileNotFoundError as e:
-            logging.error(f"Could not start process: {e}")
+            logger.error(f"Could not start process: {e}")
             return False
 
         set_current_process(proc)
@@ -249,6 +270,7 @@ def run(command, threshold, max_retries=10):
                 break
             if line:
                 print(line, end='', flush=True)
+                log_output(line)
                 full_output.append(line)
 
                 # UPDATED: Catch more phrasing variants
@@ -264,7 +286,7 @@ def run(command, threshold, max_retries=10):
 
         # Watchdog killed the process
         if should_stop():
-            logging.info(f"\n🛑 Stopped by watchdog: {_stop_reason}")
+            logger.info(f"\n🛑 Stopped by watchdog: {_stop_reason}")
             return False
 
         # UPDATED: If limit was reached, we IGNORE the exit code and wait
@@ -280,7 +302,7 @@ def run(command, threshold, max_retries=10):
                 # Dynamic log message based on what will actually run next
                 next_action = "claude -c" if not first_run else " ".join(command)
                 
-                logging.warning(
+                logger.warning(
                     f"Limit reached. Resuming at {renewal_datetime} "
                     f"(~{wait_seconds/60:.1f} minutes). Next: {next_action}"
                 )
@@ -288,11 +310,11 @@ def run(command, threshold, max_retries=10):
                 end_time = time.time() + wait_seconds
                 while time.time() < end_time:
                     if should_stop():
-                        logging.info(f"Stopped during wait: {_stop_reason}")
+                        logger.info(f"Stopped during wait: {_stop_reason}")
                         return False
                     time.sleep(5)
             else:
-                logging.error("Could not parse renewal time. Waiting 10 minutes as fallback.")
+                logger.error("Could not parse renewal time. Waiting 10 minutes as fallback.")
                 time.sleep(600)
 
             retries += 1
@@ -300,45 +322,118 @@ def run(command, threshold, max_retries=10):
 
         # Normal exit (Only if no limit was hit)
         if proc.returncode == 0:
-            logging.info("✅ Task completed successfully.")
+            logger.info("✅ Task completed successfully.")
             return True
         else:
-            logging.error(f"Claude exited with code {proc.returncode}.")
+            logger.error(f"Claude exited with code {proc.returncode}.")
             return False
 
-    logging.error("Max retries reached.")
+    logger.error("Max retries reached.")
     return False
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
+def build_claude_command(args):
+    """
+    Build the claude command list from parsed args.
+
+    Supports two modes:
+      1. Simple: task prompt as positional arg (with optional --model, --resume)
+      2. Advanced: raw claude args passed via args.claude_raw
+    """
+    if args.claude_raw:
+        return args.claude_raw
+
+    # --resume mode: no prompt needed
+    if args.resume:
+        return ["claude", "-c", "-p", "continue"]
+
+    # Simple mode: build from task + optional flags
+    if not args.task:
+        return None
+
+    cmd = ["claude"]
+    if args.model:
+        cmd.extend(["--model", args.model])
+    cmd.extend(["-p", args.task])
+    return cmd
+
+
 def main():
+    # Pre-split sys.argv on '--' so argparse doesn't consume it
+    argv = sys.argv[1:]
+    claude_raw = []
+    if "--" in argv:
+        idx = argv.index("--")
+        claude_raw = argv[idx + 1:]
+        argv = argv[:idx]
+
     parser = argparse.ArgumentParser(
-        description="Run Claude Code non-stop, auto-resuming on 5-hour limit, stopping at 7-day threshold."
+        prog="claude-nightshift",
+        description="Run Claude Code autonomously until done. Auto-resumes on 5-hour limits, stops at 7-day threshold.",
+        epilog="Examples:\n"
+               '  claude-nightshift "fix all lint errors"\n'
+               '  claude-nightshift -t 85 --model opus "refactor auth"\n'
+               '  claude-nightshift --resume\n'
+               '  claude-nightshift -- claude -p "task" --allowedTools Edit\n',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--threshold", type=float, default=70.0,
+    parser.add_argument("task", nargs="?", default=None,
+                        help="Task prompt for Claude (quoted string)")
+    parser.add_argument("-t", "--threshold", type=float, default=70.0,
                         help="7-day usage %% at which to stop (default: 70)")
-    parser.add_argument("--interval", type=int, default=60,
+    parser.add_argument("-i", "--interval", type=int, default=60,
                         help="Seconds between 7-day usage checks (default: 60)")
-    parser.add_argument("claude_args", nargs=argparse.REMAINDER,
-                        help="Claude command and args, e.g.: -- claude -p 'task'")
+    parser.add_argument("-r", "--max-retries", type=int, default=10,
+                        help="Max resume retries on 5-hour limits (default: 10)")
+    parser.add_argument("-m", "--model", type=str, default=None,
+                        help="Claude model: alias (opus, sonnet, haiku) or full name (claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5-20251001)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume the last Claude session (claude -c -p continue)")
+    parser.add_argument("-l", "--log", action="store_true",
+                        help="Log all output to nightshift_YYYYMMDD_HHMMSS.log")
+    parser.add_argument("--log-file", type=str, default=None, metavar="FILE",
+                        help="Log all output to a specific file")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the command that would be run, then exit")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    args.claude_raw = claude_raw
 
-    # Strip leading '--' separator if present
-    claude_args = args.claude_args
-    if claude_args and claude_args[0] == "--":
-        claude_args = claude_args[1:]
+    claude_cmd = build_claude_command(args)
 
-    if not claude_args:
+    if not claude_cmd:
         parser.print_help()
         sys.exit(1)
 
-    logging.info(f"Starting claude_nightshift.py")
-    logging.info(f"  Command   : {' '.join(claude_args)}")
-    logging.info(f"  Threshold : {args.threshold}%")
-    logging.info(f"  Interval  : {args.interval}s")
+    if args.dry_run:
+        # Show what would run (with --dangerously-skip-permissions added)
+        preview = list(claude_cmd)
+        if "--dangerously-skip-permissions" not in preview:
+            preview.insert(1, "--dangerously-skip-permissions")
+        print(" ".join(preview))
+        sys.exit(0)
+
+    # Resolve log path
+    log_path = None
+    if args.log_file:
+        log_path = args.log_file
+    elif args.log:
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = f"nightshift_{stamp}.log"
+
+    setup_logging(log_path)
+
+    if log_path:
+        logger.info(f"Logging to {log_path}")
+
+    logger.info(f"Starting claude-nightshift")
+    logger.info(f"  Command    : {' '.join(claude_cmd)}")
+    logger.info(f"  Threshold  : {args.threshold}%")
+    logger.info(f"  Interval   : {args.interval}s")
+    logger.info(f"  Max retries: {args.max_retries}")
 
     # Start watchdog in background
     t = threading.Thread(
@@ -350,7 +445,7 @@ def main():
 
     # Handle Ctrl+C gracefully
     def handle_sigint(sig, frame):
-        logging.info("\nInterrupted by user.")
+        logger.info("\nInterrupted by user.")
         proc = get_current_process()
         if proc and proc.poll() is None:
             proc.terminate()
@@ -358,7 +453,7 @@ def main():
 
     signal.signal(signal.SIGINT, handle_sigint)
 
-    success = run(claude_args, args.threshold)
+    success = run(claude_cmd, args.threshold, max_retries=args.max_retries)
     sys.exit(0 if success else 1)
 
 
