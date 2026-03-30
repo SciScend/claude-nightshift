@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """
-claude_nightshift.py
+claude-nightshift.py
 
-Runs a Claude Code task non-stop:
-- Auto-resumes after 5-hour session limit (using `claude -c`)
+Runs a Claude Code task fully autonomously and non-stop until completion or until hitting a 7-day usage threshold:
+- Auto-resumes after 5-hour session limit (using `claude -c -p "continue"`)
 - Stops automatically if 7-day usage hits the threshold (default 70%)
+- Always forces --dangerously-skip-permissions (added if missing)
+- Closes stdin so Claude never blocks waiting for input
 
 Usage:
-    python3 claude_nightshift.py [--threshold 70] [--interval 60] -- claude --dangerously-skip-permissions -p "your task"
-    // claude_nightshift --threshold 85 --interval 60 -- claude --dangerously-skip-permissions -c -p "continue"
-Arguments:
+    claude-nightshift [options] -- claude -p "your task"
+    claude-nightshift --threshold 85 -- claude -p "refactor the auth module"
+    claude-nightshift --threshold 90 --interval 120 -- claude -p "fix all lint errors"
+
+Options:
     --threshold   7-day usage % at which to stop (default: 70)
-    --interval    How often in seconds to check 7-day usage (default: 60)
-    --            Everything after this is the claude command to run
+    --interval    Seconds between 7-day usage checks (default: 60)
+    --            Separator; everything after this is the claude command
+
+Notes:
+    - --dangerously-skip-permissions is added automatically; no need to include it
+    - On resume, the script runs: claude -c --dangerously-skip-permissions -p "continue"
+    - Requires `npx cclimits --claude` for 7-day usage monitoring
 """
 
 import subprocess
