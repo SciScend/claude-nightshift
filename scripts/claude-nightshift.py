@@ -3,12 +3,15 @@
 claude-nightshift — run Claude Code tasks autonomously until done.
 
 Auto-resumes after 5-hour session limits, stops when 7-day usage hits threshold.
+Uses a hybrid resume strategy to minimize token usage on long-running tasks.
 
 Usage:
     claude-nightshift "your task"
     claude-nightshift -t 85 "refactor the auth module"
     claude-nightshift -t 90 -i 120 --model opus "fix all lint errors"
-    claude-nightshift --resume                     # resume last session
+    claude-nightshift --max-turns 50 "fix all lint errors"
+    claude-nightshift --compress-after 2 "large refactor"
+    claude-nightshift --resume                       # resume last session
     claude-nightshift -l "some task"                 # log output to nightshift_*.log
     claude-nightshift --log-file run.log "some task" # log output to specific file
     claude-nightshift --dry-run "some task"          # preview command without running
@@ -16,9 +19,16 @@ Usage:
 Advanced (full control over claude args):
     claude-nightshift -- claude -p "task" --model opus --allowedTools Edit,Write
 
+Resume strategy (token optimization):
+    On 5-hour limit hits, the script resumes automatically. The first N resumes
+    (default 3, set via --compress-after) use `claude -c` which carries the full
+    conversation history. After that, it switches to compressed context: a fresh
+    Claude session seeded with the original task and a progress summary that
+    Claude writes to `.nightshift-status.md` before each session ends. This
+    avoids unbounded context growth on multi-session tasks.
+
 Notes:
     - --dangerously-skip-permissions is always added automatically
-    - On resume: claude -c --dangerously-skip-permissions -p "continue"
     - Requires `npx cclimits --claude` for 7-day usage monitoring
 """
 
@@ -89,6 +99,48 @@ def set_stop(reason):
 def should_stop():
     with _lock:
         return _stop_flag
+
+
+# ---------------------------------------------------------------------------
+# Status file & prompt helpers (for compressed context resumes)
+# ---------------------------------------------------------------------------
+
+STATUS_FILE = ".nightshift-status.md"
+
+STATUS_INSTRUCTION = (
+    "\n\nBefore your session ends, write a concise progress summary to "
+    f"`{STATUS_FILE}`: what's done, key decisions, and next steps."
+)
+
+
+def read_status_file():
+    """Read the compressed context status file, if it exists."""
+    try:
+        with open(STATUS_FILE, "r") as f:
+            return f.read().strip()
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def extract_task_from_command(cmd):
+    """Extract the -p argument value from a claude command list."""
+    try:
+        idx = cmd.index("-p")
+        return cmd[idx + 1] if idx + 1 < len(cmd) else None
+    except ValueError:
+        return None
+
+
+def inject_prompt(cmd, suffix):
+    """Append text to the -p argument in a command list. Returns a new list."""
+    cmd = list(cmd)
+    try:
+        idx = cmd.index("-p")
+        if idx + 1 < len(cmd):
+            cmd[idx + 1] = cmd[idx + 1] + suffix
+    except ValueError:
+        pass
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +273,13 @@ def watchdog_thread(threshold, interval):
 # Main runner
 # ---------------------------------------------------------------------------
 
-def run(command, threshold, max_retries=10):
+def run(command, threshold, max_retries=10, compress_after=3, max_turns=None):
+    original_task = extract_task_from_command(command)
+
+    # Inject status-file instruction so Claude writes progress before session ends
+    if original_task:
+        command = inject_prompt(command, STATUS_INSTRUCTION)
+
     first_run = True
     retries = 0
 
@@ -230,17 +288,32 @@ def run(command, threshold, max_retries=10):
             logger.info(f"Stopped before retry: {_stop_reason}")
             return False
 
-        # Use -c for all runs after the very first one
         if first_run:
             cmd = list(command)
-            # Ensure autonomous flags are always present on the initial command
             if "--dangerously-skip-permissions" not in cmd:
                 cmd.insert(1, "--dangerously-skip-permissions")
             first_run = False
+        elif retries < compress_after:
+            # Full context resume — carries conversation history
+            cmd = ["claude", "-c", "--dangerously-skip-permissions"]
+            if max_turns:
+                cmd.extend(["--max-turns", str(max_turns)])
+            cmd.extend(["-p", "continue"])
         else:
-            resume_cmd = ["claude", "-c", "--dangerously-skip-permissions"]
-            resume_cmd.extend(["-p", "continue"])
-            cmd = resume_cmd
+            # Compressed context resume — fresh start with status summary
+            status = read_status_file()
+            parts = []
+            if original_task:
+                parts.append(f"Original task: {original_task}")
+            if status:
+                parts.append(f"Progress from previous session:\n\n{status}")
+            parts.append("Continue where you left off." + STATUS_INSTRUCTION)
+            prompt = "\n\n".join(parts)
+            cmd = ["claude", "--dangerously-skip-permissions"]
+            if max_turns:
+                cmd.extend(["--max-turns", str(max_turns)])
+            cmd.extend(["-p", prompt])
+            logger.info(f"Resuming with compressed context (resume {retries})")
 
         logger.info(f"Running: {' '.join(cmd)}")
 
@@ -299,12 +372,12 @@ def run(command, threshold, max_retries=10):
                 now = datetime.datetime.now()
                 wait_seconds = max(0, (renewal_datetime - now).total_seconds()) + 30
 
-                # Dynamic log message based on what will actually run next
-                next_action = "claude -c" if not first_run else " ".join(command)
-                
+                next_strategy = "full context (-c)" if retries + 1 < compress_after \
+                    else "compressed context (fresh)"
+
                 logger.warning(
                     f"Limit reached. Resuming at {renewal_datetime} "
-                    f"(~{wait_seconds/60:.1f} minutes). Next: {next_action}"
+                    f"(~{wait_seconds/60:.1f} minutes). Next: {next_strategy}"
                 )
                 
                 end_time = time.time() + wait_seconds
@@ -357,6 +430,8 @@ def build_claude_command(args):
     cmd = ["claude"]
     if args.model:
         cmd.extend(["--model", args.model])
+    if args.max_turns:
+        cmd.extend(["--max-turns", str(args.max_turns)])
     cmd.extend(["-p", args.task])
     return cmd
 
@@ -396,6 +471,11 @@ def main():
                         help="Log all output to nightshift_YYYYMMDD_HHMMSS.log")
     parser.add_argument("--log-file", type=str, default=None, metavar="FILE",
                         help="Log all output to a specific file")
+    parser.add_argument("--max-turns", type=int, default=None, metavar="N",
+                        help="Max agentic turns per Claude session (passed to claude --max-turns)")
+    parser.add_argument("--compress-after", type=int, default=3, metavar="N",
+                        help="After N resumes, switch from full context (-c) to compressed "
+                             "context via status file (default: 3)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the command that would be run, then exit")
 
@@ -430,10 +510,13 @@ def main():
         logger.info(f"Logging to {log_path}")
 
     logger.info(f"Starting claude-nightshift")
-    logger.info(f"  Command    : {' '.join(claude_cmd)}")
-    logger.info(f"  Threshold  : {args.threshold}%")
-    logger.info(f"  Interval   : {args.interval}s")
-    logger.info(f"  Max retries: {args.max_retries}")
+    logger.info(f"  Command       : {' '.join(claude_cmd)}")
+    logger.info(f"  Threshold     : {args.threshold}%")
+    logger.info(f"  Interval      : {args.interval}s")
+    logger.info(f"  Max retries   : {args.max_retries}")
+    logger.info(f"  Compress after: {args.compress_after} resumes")
+    if args.max_turns:
+        logger.info(f"  Max turns     : {args.max_turns}")
 
     # Start watchdog in background
     t = threading.Thread(
@@ -453,7 +536,8 @@ def main():
 
     signal.signal(signal.SIGINT, handle_sigint)
 
-    success = run(claude_cmd, args.threshold, max_retries=args.max_retries)
+    success = run(claude_cmd, args.threshold, max_retries=args.max_retries,
+                  compress_after=args.compress_after, max_turns=args.max_turns)
     sys.exit(0 if success else 1)
 
 
