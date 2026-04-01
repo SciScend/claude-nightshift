@@ -246,7 +246,11 @@ def watchdog_thread(threshold, interval):
         used = parse_7day_usage(output)
 
         if used is None:
-            logger.warning("[watchdog] Could not parse 7-day usage from cclimits output")
+            if "429" in output or "Rate limit" in output or "Too Many Requests" in output:
+                logger.warning("[watchdog] Usage API rate limited (HTTP 429). Backing off for 5 minutes...")
+                time.sleep(300)
+            else:
+                logger.warning("[watchdog] Could not parse 7-day usage from cclimits output")
             continue
 
         logger.info(f"[watchdog] 7-day usage: {used}%")
@@ -397,9 +401,33 @@ def run(command, threshold, max_retries=10, compress_after=3, max_turns=None):
         if proc.returncode == 0:
             logger.info("✅ Task completed successfully.")
             return True
-        else:
-            logger.error(f"Claude exited with code {proc.returncode}.")
-            return False
+
+        # Check for transient errors worth retrying
+        output_text = "".join(full_output)
+        transient_patterns = [
+            "authentication_error", "token has expired",
+            "econnrefused", "network error", "502 bad gateway",
+            "503 service", "socket hang up",
+        ]
+        is_transient = any(p in output_text.lower() for p in transient_patterns)
+
+        if is_transient:
+            retries += 1
+            backoff = min(300, 60 * retries)
+            logger.warning(
+                f"Transient error (exit code {proc.returncode}). "
+                f"Retrying in {backoff}s (attempt {retries}/{max_retries})..."
+            )
+            end_time = time.time() + backoff
+            while time.time() < end_time:
+                if should_stop():
+                    logger.info(f"Stopped during backoff: {_stop_reason}")
+                    return False
+                time.sleep(5)
+            continue
+
+        logger.error(f"Claude exited with code {proc.returncode}.")
+        return False
 
     logger.error("Max retries reached.")
     return False
