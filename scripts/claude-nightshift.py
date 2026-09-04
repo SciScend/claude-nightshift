@@ -9,6 +9,8 @@ still below a threshold you choose.
 Usage:
     claude-nightshift "your task"
     claude-nightshift -t 85 "refactor the auth module"
+    claude-nightshift -w auto --horizon 20h "big refactor"  # budget a 20h stretch
+    claude-nightshift -w 2 "big refactor"                   # at most 2 × 5h windows
     claude-nightshift -t 90 --model opus --effort medium "fix all lint errors"
     claude-nightshift --max-turns 50 "fix all lint errors"
     claude-nightshift --compress-after 2 "large refactor"
@@ -30,6 +32,43 @@ How the weekly threshold works (-t/--threshold):
     Pass --hard-stop for the old behaviour: a background thread polls usage every
     --interval seconds and terminates Claude mid-session once the threshold is
     reached. This loses unsaved work; it is off by default.
+
+Budgeting one run (-w/--max-windows, --horizon):
+    The threshold alone answers "am I out of weekly budget?". It does not answer
+    "should this one task be allowed to spend the rest of it?". That is what the
+    window budget is for.
+
+    -w N        Run at most N five-hour windows, then stop even if the weekly
+                threshold is nowhere near. Predictable and boring; use it when
+                you know what a task is worth.
+
+    -w auto     Work N out for you, from an even spread of what is left over the
+                time that is left:
+
+                    allowance = weekly_remaining × (horizon / time_to_reset)
+                    N         = allowance / cost_of_one_window
+
+                So with 78% left, 3d18h to reset and a 20h horizon, this run is
+                entitled to 78 × 20/90 = 17.3% of the pool — about two windows.
+                The other two windows the stretch could have held are left for
+                the rest of the week. Set --horizon to how long you are actually
+                away; it is the only input only you know.
+
+    Because the allowance is a share of what remains, it shrinks as the pool does
+    and never quite empties it. Near the reset the share approaches everything
+    left, so the last day of a window is deliberately more generous than the
+    first.
+
+    Both forms also refuse to *start* a window that is predicted to cross the
+    ceiling, rather than noticing after it already has. --no-overshoot turns that
+    on by itself, without a window cap.
+
+What one window costs is measured, not guessed:
+    The weekly figure is read before and after every window that ends on a limit,
+    and the difference is that window's real cost. The median of recent samples
+    lives in ~/.claude/nightshift-state.json, so after the first run the budget
+    maths is calibrated to your actual workload instead of an assumption. Until
+    then a conservative estimate is used and is labelled as one in the log.
 
 Where usage numbers come from (no tokens are spent on any of these):
     1. `rate_limit_event` messages in Claude's own stream-json output — free,
@@ -735,10 +774,239 @@ def classify(session):
 
 
 # ---------------------------------------------------------------------------
+# Budget: how much of the weekly pool one run may consume
+# ---------------------------------------------------------------------------
+
+FIVE_HOURS = 5 * 3600
+STATE_PATH = os.path.expanduser("~/.claude/nightshift-state.json")
+MAX_COST_SAMPLES = 20
+
+# Fallback used only until the first full window has been measured.
+DEFAULT_WINDOW_COST = 8.0   # % of the weekly pool one 5-hour window costs
+
+
+def parse_duration(text):
+    """Parse '20h', '90m', '2d', '600s', or a bare number of hours, into seconds."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*", str(text).lower())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration {text!r} — use e.g. 20h, 90m, 2d")
+    scale = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 3600}
+    return float(match.group(1)) * scale[match.group(2)]
+
+
+def max_windows_arg(value):
+    """Parse --max-windows: a positive integer, or the literal 'auto'."""
+    if str(value).strip().lower() == "auto":
+        return "auto"
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--max-windows takes a positive integer or 'auto', got {value!r}")
+    if count < 1:
+        raise argparse.ArgumentTypeError("--max-windows must be at least 1")
+    return count
+
+
+def median(values):
+    """Median of a list, or None if empty. Robust to the odd runaway session."""
+    ordered = sorted(values)
+    count = len(ordered)
+    if not count:
+        return None
+    mid = count // 2
+    if count % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def load_cost_samples():
+    """Previously measured per-window costs, in weekly percent."""
+    try:
+        with open(STATE_PATH, "r") as f:
+            data = json.load(f) or {}
+        samples = [float(x) for x in data.get("window_cost_samples", [])]
+        return [s for s in samples if 0 < s < 50]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def save_cost_samples(samples):
+    """Persist the rolling cost samples, keeping any other state intact."""
+    try:
+        data = {}
+        if os.path.exists(STATE_PATH):
+            try:
+                with open(STATE_PATH, "r") as f:
+                    data = json.load(f) or {}
+            except ValueError:
+                data = {}
+        data["window_cost_samples"] = samples[-MAX_COST_SAMPLES:]
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, STATE_PATH)
+    except OSError as exc:
+        logger.debug(f"Could not persist window-cost state: {exc}")
+
+
+class Budget:
+    """
+    How much of the weekly pool a single run may consume.
+
+    Three independent rules, all checked before a session starts:
+
+      1. Threshold    — never cross --threshold. Always on.
+      2. Run ceiling  — with --max-windows auto, this run gets only the share of
+                        the remaining pool that its --horizon is worth, so one
+                        long task cannot eat the whole week.
+      3. Window count — stop after --max-windows five-hour windows.
+
+    Rules 2 and 3 need to know what one full 5-hour window costs in weekly
+    percent. That is measured, not guessed: the weekly figure is read before and
+    after every window that ends on a limit, and the median of recent samples is
+    kept in ~/.claude/nightshift-state.json so later runs start out calibrated.
+    """
+
+    def __init__(self, threshold, max_windows=None, horizon=None,
+                 predictive=False):
+        self.threshold = threshold
+        self.horizon = horizon or 12 * 3600
+        self.requested_windows = max_windows      # int, "auto", or None
+        self.max_windows = None if max_windows == "auto" else max_windows
+        self.windows_used = 0
+
+        # Tightened by plan() in auto mode; otherwise the threshold is the ceiling.
+        self.run_ceiling = threshold
+
+        # Refuse to *start* a window that is predicted to overshoot, rather than
+        # noticing only once it already has.
+        self.predictive = predictive or max_windows is not None
+
+        self.samples = load_cost_samples()
+        measured = median(self.samples)
+        self.window_cost = measured if measured else DEFAULT_WINDOW_COST
+        self.cost_is_measured = measured is not None
+        self._planned = False
+
+    def plan(self, usage):
+        """
+        Derive the run ceiling and window count from the first usage reading.
+        Called at the first gate, once, and only does real work in auto mode.
+        """
+        if self._planned or usage is None or usage.weekly_pct is None:
+            return
+        self._planned = True
+
+        if self.requested_windows != "auto":
+            return
+
+        remaining = max(0.0, 100.0 - usage.weekly_pct)
+        time_left = None
+        if usage.weekly_resets:
+            time_left = usage.weekly_resets - time.time()
+
+        # An even spread of what is left over the time that is left: this run is
+        # entitled to the fraction of the pool that its horizon is of the window.
+        if not time_left or time_left <= 0:
+            share = 1.0
+        else:
+            share = min(1.0, self.horizon / time_left)
+        allowance = remaining * share
+
+        self.run_ceiling = min(self.threshold, usage.weekly_pct + allowance)
+
+        # --threshold may have clamped the ceiling below what the even spread
+        # allowed; the window count has to follow the ceiling that will actually
+        # be enforced, not the allowance we started from.
+        allowance = self.run_ceiling - usage.weekly_pct
+
+        # Never plan more windows than the budget buys, nor more than fit in the
+        # horizon; but always allow at least one, and let --threshold be the
+        # thing that says "no, not even one".
+        by_budget = int(allowance // self.window_cost)
+        by_horizon = int(self.horizon // FIVE_HOURS)
+        self.max_windows = max(1, min(by_budget, max(1, by_horizon)))
+
+        left = f"{time_left / 3600:.0f}h" if time_left else "unknown time"
+        estimate = "measured" if self.cost_is_measured else "estimated"
+        logger.info(
+            f"  Auto budget   : {allowance:.1f}% of the weekly pool "
+            f"({remaining:.1f}% left, {self.horizon / 3600:.0f}h horizon of {left} "
+            f"to reset)"
+        )
+        logger.info(
+            f"  Window budget : {self.max_windows} × 5h window(s) at "
+            f"~{self.window_cost:.1f}%/window ({estimate})"
+        )
+        logger.info(f"  Run ceiling   : stop before 7-day usage reaches "
+                    f"{self.run_ceiling:.1f}%")
+
+    def check(self, usage):
+        """May another session start? Returns (allowed: bool, reason: str)."""
+        pct = usage.weekly_pct
+
+        if self.max_windows is not None and self.windows_used >= self.max_windows:
+            return False, (f"window budget spent — {self.windows_used} of "
+                           f"{self.max_windows} five-hour window(s) used")
+
+        name = "run ceiling" if self.run_ceiling < self.threshold else "threshold"
+
+        if pct >= self.run_ceiling:
+            return False, (f"7-day usage {pct:.1f}% is at or above the "
+                           f"{name} {self.run_ceiling:.1f}%")
+
+        if self.predictive:
+            projected = pct + self.window_cost
+            if projected > self.run_ceiling:
+                note = "" if self.cost_is_measured else \
+                    " — estimated, refined after the first full window"
+                return False, (
+                    f"another window would reach ~{projected:.1f}% "
+                    f"({pct:.1f}% + {self.window_cost:.1f}%{note}), past the "
+                    f"{name} {self.run_ceiling:.1f}%")
+
+        detail = f"7-day usage {pct:.1f}%, {name} {self.run_ceiling:.1f}%"
+        if self.max_windows is not None:
+            detail += f", window {self.windows_used + 1}/{self.max_windows}"
+        return True, detail
+
+    def note_window(self, before, after):
+        """
+        Count one consumed 5-hour window and, when both readings are usable,
+        learn what it cost. `before` is the gate reading, `after` the last
+        rate_limit_event of the session.
+        """
+        self.windows_used += 1
+
+        if not (before and after):
+            return
+        if before.weekly_pct is None or after.weekly_pct is None:
+            return
+
+        delta = after.weekly_pct - before.weekly_pct
+        # A negative delta means the weekly window reset mid-run; an absurd one
+        # means the readings are not comparable. Neither is a usable sample.
+        if not 0 < delta < 50:
+            return
+
+        self.samples.append(round(delta, 2))
+        save_cost_samples(self.samples)
+        self.window_cost = median(self.samples[-MAX_COST_SAMPLES:])
+        self.cost_is_measured = True
+        logger.info(
+            f"[budget] window {self.windows_used} cost {delta:.1f}% of the weekly "
+            f"pool (estimate now {self.window_cost:.1f}% from "
+            f"{len(self.samples[-MAX_COST_SAMPLES:])} sample(s))"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------
 
-def weekly_gate(threshold, cached, max_age, allow_unknown):
+def weekly_gate(budget, cached, max_age, allow_unknown):
     """
     Check whether another session may start.
 
@@ -754,10 +1022,9 @@ def weekly_gate(threshold, cached, max_age, allow_unknown):
             return True, "weekly usage unknown — proceeding (--allow-unknown-usage)", None
         return False, "weekly usage could not be determined (use --allow-unknown-usage to proceed anyway)", None
 
-    if usage.weekly_pct >= threshold:
-        return False, f"7-day usage {usage.weekly_pct:.1f}% is at or above threshold {threshold}%", usage
-
-    return True, f"7-day usage {usage.weekly_pct:.1f}% (threshold {threshold}%)", usage
+    budget.plan(usage)
+    allowed, reason = budget.check(usage)
+    return allowed, reason, usage
 
 
 def resolve_wait_target(session):
@@ -807,7 +1074,7 @@ def build_resume_command(retries, compress_after, session_id, original_task,
     return cmd, "compressed context (fresh)"
 
 
-def run(command, threshold, max_retries=10, compress_after=3, base_flags=(),
+def run(command, budget, max_retries=10, compress_after=3, base_flags=(),
         structured=True, usage_max_age=120, allow_unknown=False):
     original_task = extract_task_from_command(command)
 
@@ -819,6 +1086,7 @@ def run(command, threshold, max_retries=10, compress_after=3, base_flags=(),
     retries = 0
     session_id = None
     cached_usage = None
+    window_start_usage = None
 
     while retries < max_retries:
         if should_stop():
@@ -826,10 +1094,11 @@ def run(command, threshold, max_retries=10, compress_after=3, base_flags=(),
             return False
 
         # --- the gate: may we start another session? ---
-        allowed, reason, usage = weekly_gate(threshold, cached_usage,
+        allowed, reason, usage = weekly_gate(budget, cached_usage,
                                              usage_max_age, allow_unknown)
         if usage:
             cached_usage = usage
+            window_start_usage = usage
         if not allowed:
             logger.warning(f"🛑 Not starting another session: {reason}")
             return False
@@ -866,6 +1135,7 @@ def run(command, threshold, max_retries=10, compress_after=3, base_flags=(),
             return True
 
         if outcome == "limit":
+            budget.note_window(window_start_usage, session.usage)
             target = resolve_wait_target(session)
             if target:
                 wait_seconds = max(0, target - time.time()) + 30
@@ -960,11 +1230,15 @@ def main():
                '  claude-nightshift "fix all lint errors"\n'
                '  claude-nightshift -t 85 --model opus "refactor auth"\n'
                '  claude-nightshift -t 90 --effort medium "long refactor"\n'
+               '  claude-nightshift -w auto --horizon 20h "big refactor"\n'
+               '  claude-nightshift -w 2 "spend at most two 5h windows"\n'
                '  claude-nightshift --resume\n'
                '  claude-nightshift -- claude -p "task" --allowedTools Edit\n'
                "\n"
                "The weekly threshold is checked before each session starts; a running\n"
                "session is never interrupted unless you pass --hard-stop.\n"
+               "-w/--max-windows caps what a single run may spend; 'auto' spreads the\n"
+               "remaining weekly budget evenly over the time left before it resets.\n"
                "Usage figures are read from Claude's own stream, then the OAuth usage\n"
                "endpoint, then cclimits — none of them cost tokens.\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -974,6 +1248,18 @@ def main():
     parser.add_argument("-t", "--threshold", type=float, default=70.0,
                         help="7-day usage %% at or above which no new session is "
                              "started (default: 70)")
+    parser.add_argument("-w", "--max-windows", type=max_windows_arg, default=None,
+                        metavar="N|auto",
+                        help="Cap this run at N five-hour windows, so one task cannot "
+                             "spend the whole week. 'auto' derives N from the weekly "
+                             "budget left and --horizon (default: no cap)")
+    parser.add_argument("--horizon", type=parse_duration, default=12 * 3600,
+                        metavar="DURATION",
+                        help="How long you are leaving nightshift unattended, e.g. 20h, "
+                             "90m, 2d. Only used by --max-windows auto (default: 12h)")
+    parser.add_argument("--no-overshoot", action="store_true",
+                        help="Do not start a window that is predicted to cross the "
+                             "threshold. Implied by --max-windows")
     parser.add_argument("-i", "--interval", type=int, default=300,
                         help="Seconds between usage checks, --hard-stop only "
                              "(default: 300)")
@@ -1060,9 +1346,22 @@ def main():
     if log_path:
         logger.info(f"Logging to {log_path}")
 
+    budget = Budget(args.threshold,
+                    max_windows=args.max_windows,
+                    horizon=args.horizon,
+                    predictive=args.no_overshoot)
+
     logger.info("Starting claude-nightshift")
     logger.info(f"  Command       : {' '.join(claude_cmd)}")
     logger.info(f"  Weekly gate   : start a session only below {args.threshold}%")
+    if args.max_windows == "auto":
+        logger.info(f"  Window budget : auto, over a {args.horizon / 3600:.0f}h horizon")
+    elif args.max_windows:
+        logger.info(f"  Window budget : {args.max_windows} × 5h window(s)")
+    if budget.predictive:
+        estimate = "measured" if budget.cost_is_measured else "estimated, no samples yet"
+        logger.info(f"  Window cost   : ~{budget.window_cost:.1f}% of weekly "
+                    f"({estimate})")
     logger.info(f"  Max retries   : {args.max_retries}")
     logger.info(f"  Compress after: {args.compress_after} resumes")
     if args.effort:
@@ -1095,7 +1394,7 @@ def main():
 
     signal.signal(signal.SIGINT, handle_sigint)
 
-    success = run(claude_cmd, args.threshold,
+    success = run(claude_cmd, budget,
                   max_retries=args.max_retries,
                   compress_after=args.compress_after,
                   base_flags=base_flags,
