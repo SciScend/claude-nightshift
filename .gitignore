@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# claude-nightshift runtime files
+.nightshift-status.md
+claude_nightshift.log
+nightshift_*.log
+
+# Local AI-assistant files: prompts, reports and instructions
+ai/
+CLAUDE.md

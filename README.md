@@ -3,8 +3,7 @@
 **Run a Claude Code task autonomously for hours — across every 5-hour limit — without blowing your weekly budget.**
 
 [![CI](https://github.com/SciScend/claude-nightshift/actions/workflows/ci.yml/badge.svg)](https://github.com/SciScend/claude-nightshift/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/claude-nightshift.svg)](https://pypi.org/project/claude-nightshift/)
-[![Python](https://img.shields.io/pypi/pyversions/claude-nightshift.svg)](https://pypi.org/project/claude-nightshift/)
+![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Claude Code on a Pro or Max plan has two limits: a **5-hour session window** that
@@ -28,9 +27,8 @@ output stream, or from the same OAuth endpoint `/usage` uses.
 ## Install
 
 ```bash
-uv tool install claude-nightshift     # recommended
-pipx install claude-nightshift
-pip install claude-nightshift
+uv tool install git+https://github.com/SciScend/claude-nightshift   # recommended
+pipx install git+https://github.com/SciScend/claude-nightshift
 ```
 
 Requires Python 3.9+ and the [Claude Code](https://claude.com/claude-code) CLI on

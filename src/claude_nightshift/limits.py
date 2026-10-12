@@ -23,7 +23,7 @@ LIMIT_PHRASES = (
 )
 
 _CLOCK_RE = re.compile(
-    r"(?:renewed at|resets\s+(?:at\s+)?)(\d{1,2}(?::\d{2})?\s*[AP]M)", re.IGNORECASE
+    r"(?:renewed at\s+|resets\s+(?:at\s+)?)(\d{1,2}(?::\d{2})?\s*[AP]M)", re.IGNORECASE
 )
 _ISO_RE = re.compile(
     r"resets at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)", re.IGNORECASE

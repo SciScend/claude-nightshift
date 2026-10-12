@@ -299,11 +299,3 @@ claude-nightshift -t 95 "task"
 # Cheap and bounded, for something exploratory
 claude-nightshift -m haiku -e low --max-turns 30 -w 1 "task"
 ```
-
----
-
-## Design notes
-
-Fuller rationale, including why the threshold became a gate rather than an
-interrupt and the limit-detection bugs this replaced, is in
-[`reports/2026-09-04-nightshift-weekly-gate.md`](reports/2026-09-04-nightshift-weekly-gate.md).
