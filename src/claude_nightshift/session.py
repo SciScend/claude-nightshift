@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 
 from claude_nightshift.control import set_current_process
 from claude_nightshift.limits import looks_like_limit
@@ -39,6 +40,7 @@ class SessionResult:
         self.usage = None  # Usage built from the last rate_limit_event
         self.output_text = ""
         self.text_limit_seen = False
+        self.duration = 0.0  # wall-clock seconds the claude process ran
 
 
 def _render_stream_event(event):
@@ -131,6 +133,7 @@ def usage_from_rate_limit_event(event):
 def run_session(cmd, structured=True) -> SessionResult:
     """Launch one claude process, stream its output, and collect what we need."""
     session = SessionResult()
+    started_at = time.time()
 
     try:
         proc = subprocess.Popen(
@@ -196,6 +199,7 @@ def run_session(cmd, structured=True) -> SessionResult:
 
     session.returncode = proc.returncode
     session.output_text = "".join(collected)
+    session.duration = time.time() - started_at
     return session
 
 

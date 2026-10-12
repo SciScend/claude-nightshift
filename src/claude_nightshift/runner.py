@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from claude_nightshift import control
+from claude_nightshift.budget import DEFAULT_MIN_WINDOW_LEFT, FIVE_HOURS
 from claude_nightshift.logsetup import get_logger
 from claude_nightshift.session import classify, run_session
 from claude_nightshift.status import (
@@ -18,6 +19,7 @@ from claude_nightshift.usage import fetch_usage
 
 __all__ = [
     "weekly_gate",
+    "window_ready",
     "resolve_wait_target",
     "build_resume_command",
     "watchdog_thread",
@@ -32,6 +34,9 @@ SKIP_PERMISSIONS_FLAG = "--dangerously-skip-permissions"
 FALLBACK_WAIT_SECONDS = 600
 # Slack added after a known reset time, so we never wake a moment too early.
 RESET_GRACE_SECONDS = 30
+# Consecutive pre-session waits before giving up on the 5-hour gate and running
+# anyway. Bounds the loop if a usage source is stuck reporting a spent window.
+MAX_WINDOW_DEFERRALS = 3
 
 
 def watchdog_thread(threshold, interval) -> None:
@@ -91,6 +96,37 @@ def weekly_gate(budget, cached, max_age, allow_unknown):
     return allowed, reason, usage
 
 
+def window_ready(usage, min_left):
+    """Is there enough of the 5-hour window left to be worth starting a session?
+
+    The weekly gate answers "is there budget this week?"; it says nothing about
+    the window the next session would actually run in. Starting nine minutes
+    before a reset buys a session that dies on the limit having done nothing.
+
+    Returns ``(ready, reason, reset_at)``. Anything this cannot establish reads
+    as ready - the gate only ever fires on a figure it really has, so an
+    unreadable 5-hour window behaves as it did before.
+    """
+    if min_left <= 0 or usage is None or usage.five_hour_pct is None:
+        return True, "", None
+
+    left = 100.0 - usage.five_hour_pct
+    if left >= min_left:
+        return True, "", None
+
+    reset_at = usage.five_hour_resets
+    now = time.time()
+    # No credible reset time to wait for: let the session run and let the limit
+    # handling deal with it, exactly as before this gate existed.
+    if not reset_at or reset_at <= now or reset_at - now > FIVE_HOURS + 600:
+        return True, "", None
+
+    return False, (
+        f"5-hour window is {usage.five_hour_pct:.0f}% spent "
+        f"({left:.0f}% left, need {min_left:.0f}%)"
+    ), reset_at
+
+
 def resolve_wait_target(session):
     """Work out when the 5-hour window resets. Unix epoch seconds, or None.
 
@@ -145,6 +181,7 @@ def run(
     structured=True,
     usage_max_age=120,
     allow_unknown=False,
+    min_window_left=DEFAULT_MIN_WINDOW_LEFT,
 ):
     """Run `command` to completion, waiting out limits. True if the task finished."""
     original_task = extract_task_from_command(command)
@@ -156,6 +193,7 @@ def run(
 
     first_run = True
     retries = 0
+    deferrals = 0
     session_id = None
     cached_usage = None
     window_start_usage = None
@@ -176,6 +214,28 @@ def run(
             logger.warning(f"🛑 Not starting another session: {reason}")
             return False
         logger.info(f"Gate open: {reason}")
+
+        # --- the 5-hour gate: is there a window to run in? ---
+        ready, why, reset_at = window_ready(usage, min_window_left)
+        if not ready and deferrals >= MAX_WINDOW_DEFERRALS:
+            logger.warning(
+                f"{why}, but {deferrals} wait(s) did not clear it - starting anyway"
+            )
+        elif not ready:
+            deferrals += 1
+            wait_seconds = max(0.0, reset_at - time.time()) + RESET_GRACE_SECONDS
+            logger.warning(
+                f"{why}. Waiting for it to reset at {fmt_epoch(reset_at)} "
+                f"(~{wait_seconds / 60:.1f} minutes) rather than spending a "
+                f"window on it."
+            )
+            if control.interruptible_sleep(wait_seconds):
+                logger.info(f"Stopped during wait: {control.stop_reason()}")
+                return False
+            cached_usage = None  # stale after the wait; force a fresh reading
+            continue
+        else:
+            deferrals = 0
 
         if first_run:
             cmd = list(command)
@@ -208,7 +268,7 @@ def run(
             return True
 
         if outcome == "limit":
-            budget.note_window(window_start_usage, session.usage)
+            budget.note_window(window_start_usage, session.usage, session.duration)
             target = resolve_wait_target(session)
             if target:
                 wait_seconds = max(0, target - time.time()) + RESET_GRACE_SECONDS

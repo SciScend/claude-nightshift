@@ -9,7 +9,7 @@ import sys
 import threading
 
 from claude_nightshift import __version__, control
-from claude_nightshift.budget import Budget, max_windows_arg
+from claude_nightshift.budget import DEFAULT_MIN_WINDOW_LEFT, Budget, max_windows_arg
 from claude_nightshift.logsetup import get_logger, setup_logging
 from claude_nightshift.runner import SKIP_PERMISSIONS_FLAG, run, watchdog_thread
 from claude_nightshift.timeutil import parse_duration
@@ -72,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="DURATION",
                         help="How long you are leaving nightshift unattended, e.g. 20h, "
                              "90m, 2d. Only used by --max-windows auto (default: 12h)")
+    parser.add_argument("--min-window-left", type=float,
+                        default=DEFAULT_MIN_WINDOW_LEFT, metavar="PCT",
+                        help="Do not start a session unless at least PCT%% of the "
+                             "5-hour window is left; wait for the reset instead of "
+                             "spending a budgeted window on a few minutes of work "
+                             "(default: 5, 0 disables)")
     parser.add_argument("--no-overshoot", action="store_true",
                         help="Do not start a window that is predicted to cross the "
                              "threshold. Implied by --max-windows")
@@ -176,6 +182,11 @@ def log_banner(args, budget, claude_cmd) -> None:
         logger.info(
             f"  Window cost   : ~{budget.window_cost:.1f}% of weekly ({estimate})"
         )
+    if args.min_window_left > 0:
+        logger.info(
+            f"  5-hour gate   : need {args.min_window_left:.0f}% of the "
+            f"window left to start"
+        )
     logger.info(f"  Max retries   : {args.max_retries}")
     logger.info(f"  Compress after: {args.compress_after} resumes")
     if args.effort:
@@ -250,6 +261,7 @@ def main(argv=None) -> int:
         structured=structured,
         usage_max_age=args.usage_max_age,
         allow_unknown=args.allow_unknown_usage,
+        min_window_left=args.min_window_left,
     )
     return 0 if success else 1
 

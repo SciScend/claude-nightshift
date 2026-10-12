@@ -116,6 +116,39 @@ stops instead.
 claude-nightshift -t 70 --no-overshoot "long task"
 ```
 
+### `--min-window-left` — don't start in a window that's already gone
+
+The threshold and the window budget both answer *weekly* questions. Neither
+looks at the 5-hour window the next session would actually run in.
+
+Start nine minutes before a 5-hour reset and you get a session that dies on the
+limit having done nothing — and, before this flag existed, that stub was still
+charged to the window budget. A `-w auto --horizon 10h` run that had budgeted
+exactly one window would end after five minutes, having produced nothing.
+
+So before each session the 5-hour window is checked too. If less than
+`--min-window-left` percent of it is left, nightshift waits for the reset
+instead of spending a budgeted window on it:
+
+```
+5-hour window is 100% spent (0% left, need 5%). Waiting for it to reset at
+2026-09-04 15:40:00 (~9.5 minutes) rather than spending a window on it.
+```
+
+A wait is not a retry and not a window — it costs nothing but time. Three
+consecutive waits that fail to clear the window means something is wrong with
+the reading, so the session starts anyway rather than looping.
+
+`--min-window-left 0` disables the gate. An unreadable 5-hour figure, or one
+with no credible reset time to wait for, always reads as ready: this gate can
+only ever block on a number it actually has.
+
+**A stub is also not a window for accounting.** A session that hits the limit
+within 15 minutes ran in a window that was already spent, so it is neither
+counted against `-w` nor used as a sample of what a window costs. It does still
+spend real weekly budget, so a tight run ceiling can still stop the run — which
+is the other reason to leave this gate on.
+
 ### Two things worth knowing about `auto`
 
 **It never quite empties the pool.** Each run takes a *share* of what remains,
@@ -181,6 +214,7 @@ enforced — always the *lower* of your threshold and the auto allowance.
 | `7-day usage X% is at or above the run ceiling Y%` | The `auto` allowance for this run is gone. The week isn't — a new run gets a fresh share. |
 | `7-day usage X% is at or above the threshold Y%` | The real wall. |
 | `another window would reach ~X%, past the ceiling Y%` | `--no-overshoot` declined to start a window that wouldn't fit. |
+| `5-hour window is X% spent … Waiting for it to reset` | Not a stop — a wait. The next window is worth more than the minutes left in this one. |
 | `weekly usage could not be determined` | Couldn't read usage; stopping rather than running blind. `--allow-unknown-usage` flips this. |
 
 Exit code is `0` only when the task actually completed.
@@ -244,6 +278,7 @@ Everything after `--` is passed to `claude` verbatim; nightshift only adds
 
 | Flag | Default | Purpose |
 |---|---|---|
+| `--min-window-left` | 5 | Minimum % of the 5-hour window left before a session may start; `0` disables. |
 | `-r, --max-retries` | 10 | Resume attempts across limits and turn caps. |
 | `--usage-max-age` | 120 | How long a usage reading from the stream stays fresh before re-querying. |
 | `--allow-unknown-usage` | off | Run even when usage can't be read. |

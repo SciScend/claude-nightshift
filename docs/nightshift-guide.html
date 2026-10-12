@@ -495,6 +495,16 @@
       <p>Weekly usage moves in lumps of roughly one window at a time, so a plain threshold can only notice you crossed it <em>after</em> a session already did. This checks first: if <em>current + one window</em> lands past the ceiling, it declines to start.</p>
       <pre><code>claude-nightshift <span class="flg">-t</span> 70 <span class="flg">--no-overshoot</span> <span class="cmt">"long task"</span></code></pre>
       <p><code>-w</code> switches this on for you. The flag alone gives it to you without a window cap.</p>
+
+      <h3><code>--min-window-left</code> — don't start in a window that's already gone</h3>
+      <p>The threshold and the window budget both answer <em>weekly</em> questions. Neither looks at the 5-hour window the next session would actually run in.</p>
+      <p>Start nine minutes before a 5-hour reset and you get a session that dies on the limit having done nothing — and that stub used to be charged to the window budget anyway. A <code>-w auto --horizon 10h</code> run that had budgeted exactly one window would end after five minutes, having produced nothing.</p>
+      <p>So the 5-hour window is now checked before each session too. If less than <code>--min-window-left</code> percent of it is left, nightshift waits for the reset instead of spending a budgeted window on it:</p>
+      <pre><code>5-hour window is 100% spent (0% left, need 5%). Waiting for it to reset at
+2026-09-04 15:40:00 (~9.5 minutes) rather than spending a window on it.</code></pre>
+      <p>A wait is not a retry and not a window — it costs nothing but time. Three consecutive waits that fail to clear the window mean something is wrong with the reading, so the session starts anyway rather than looping.</p>
+      <p><code>--min-window-left 0</code> disables it. An unreadable 5-hour figure, or one with no credible reset time to wait for, always reads as ready: this gate can only block on a number it actually has.</p>
+      <p class="note"><strong>A stub is not a window for accounting either.</strong> A session that hits the limit within 15 minutes ran in a window that was already spent, so it's neither counted against <code>-w</code> nor used as a sample of what a window costs. It does still spend real weekly budget, so a tight run ceiling can still stop the run — the other reason to leave this gate on.</p>
     </section>
 
     <section id="math">
@@ -577,6 +587,11 @@ Gate open: 7-day usage 22.0%, run ceiling 39.3%, window 1/2</code></pre>
               <td><span class="sev sev-budget">budget</span></td>
               <td><code>--no-overshoot</code> declined to start a window that wouldn't fit.</td>
             </tr>
+            <tr data-sev="budget">
+              <td>5-hour window is X% spent … Waiting for it to reset</td>
+              <td><span class="sev sev-budget">wait</span></td>
+              <td>Not a stop. The next window is worth more than the minutes left in this one.</td>
+            </tr>
             <tr data-sev="warn">
               <td>weekly usage could not be determined</td>
               <td><span class="sev sev-warn">unknown</span></td>
@@ -619,6 +634,7 @@ Gate open: 7-day usage 22.0%, run ceiling 39.3%, window 1/2</code></pre>
             <tr><td><code>-w, --max-windows</code></td><td>none</td><td><code>N</code> or <code>auto</code>. Caps what one run may spend.</td></tr>
             <tr><td><code>--horizon</code></td><td>12h</td><td>How long the run is left unattended. Feeds <code>auto</code>.</td></tr>
             <tr><td><code>--no-overshoot</code></td><td>off</td><td>Don't start a window predicted to cross the ceiling.</td></tr>
+            <tr><td><code>--min-window-left</code></td><td>5</td><td>Minimum % of the 5-hour window left before a session may start. <code>0</code> disables.</td></tr>
             <tr><td><code>-m, --model</code></td><td>—</td><td><code>opus</code>, <code>sonnet</code>, <code>haiku</code>, <code>fable</code>, or a full model id.</td></tr>
             <tr><td><code>-e, --effort</code></td><td>—</td><td><code>low</code> … <code>max</code>. Lower fits more work in a window.</td></tr>
             <tr><td><code>-r, --max-retries</code></td><td>10</td><td>Resume attempts across limits and turn caps.</td></tr>

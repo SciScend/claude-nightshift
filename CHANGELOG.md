@@ -10,5 +10,8 @@ First public release.
   of recent runs in `~/.claude/nightshift-state.json`.
 - Reads usage from Claude's `stream-json` output, the OAuth usage endpoint, or
   `cclimits`, without spending tokens.
+- 5-hour gate (`--min-window-left`, default 5%): waits for the reset instead of
+  starting a session in an almost spent window, and a session that hits the
+  limit within 15 minutes is not counted as a window or a cost sample.
 - Long runs switch to fresh sessions seeded with a progress summary after
   `--compress-after` resumes.

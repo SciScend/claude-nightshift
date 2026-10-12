@@ -12,6 +12,9 @@ from claude_nightshift.logsetup import get_logger
 __all__ = [
     "Budget",
     "FIVE_HOURS",
+    "DEFAULT_MIN_WINDOW_LEFT",
+    "MAX_START_UTIL_FOR_SAMPLE",
+    "MIN_WINDOW_SECONDS",
     "DEFAULT_WINDOW_COST",
     "MAX_COST_SAMPLES",
     "state_path",
@@ -28,6 +31,19 @@ MAX_COST_SAMPLES = 20
 
 # Fallback used only until the first full window has been measured.
 DEFAULT_WINDOW_COST = 8.0  # % of the weekly pool one 5-hour window costs
+
+# A session that hits the 5-hour limit sooner than this did not get a window -
+# it got the tail of one that was already spent before the run started. It is
+# neither counted against the window budget nor used as a cost sample.
+MIN_WINDOW_SECONDS = 900
+
+# A cost sample is only the price of a *whole* window if the window was near
+# empty when the session started. Above this 5-hour utilisation at the gate,
+# the weekly delta measures a fragment and would drag the median down.
+MAX_START_UTIL_FOR_SAMPLE = 25.0
+
+# How much of the 5-hour window must be left for a session to be worth starting.
+DEFAULT_MIN_WINDOW_LEFT = 5.0
 
 DEFAULT_STATE_PATH = "~/.claude/nightshift-state.json"
 STATE_PATH_ENV = "NIGHTSHIFT_STATE_PATH"
@@ -226,18 +242,36 @@ class Budget:
             detail += f", window {self.windows_used + 1}/{self.max_windows}"
         return True, detail
 
-    def note_window(self, before, after) -> None:
+    def note_window(self, before, after, duration=None) -> None:
         """Count one consumed 5-hour window and learn what it cost.
 
         ``before`` is the gate reading, ``after`` the last rate_limit_event of the
-        session. When either is unusable the window still counts, but no sample
-        is recorded.
+        session, ``duration`` its wall-clock seconds. When a reading is unusable
+        the window still counts, but no sample is recorded.
+
+        A session that hit the limit within ``MIN_WINDOW_SECONDS`` ran in a
+        window that was already spent. Charging the budget for it can end a run
+        on its first minute, so it is not counted at all.
         """
+        if duration is not None and duration < MIN_WINDOW_SECONDS:
+            logger.info(
+                f"[budget] limit hit after {duration:.0f}s - the 5-hour window was "
+                f"already spent, not counting it as a window"
+            )
+            return
+
         self.windows_used += 1
 
         if not (before and after):
             return
         if before.weekly_pct is None or after.weekly_pct is None:
+            return
+
+        # Only a window entered near-empty prices a whole window.
+        if (
+            before.five_hour_pct is not None
+            and before.five_hour_pct > MAX_START_UTIL_FOR_SAMPLE
+        ):
             return
 
         delta = after.weekly_pct - before.weekly_pct
