@@ -122,6 +122,12 @@ In priority order, none of which cost tokens:
 A typical overnight run makes one request at startup and one after each 5-hour
 wait. Everything else is read out of the stream.
 
+> **Note:** neither the `rate_limit_event` stream fields nor the
+> `/api/oauth/usage` endpoint are documented by Anthropic, and either may change
+> without notice. If every source fails, nightshift refuses to start a session
+> rather than guess (pass `--allow-unknown-usage` to run anyway), and the 5-hour
+> wait falls back to the reset time in Claude's limit message.
+
 ---
 
 ## Documentation
