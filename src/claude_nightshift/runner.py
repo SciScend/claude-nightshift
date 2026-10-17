@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import time
 
 from claude_nightshift import control
@@ -18,6 +19,7 @@ from claude_nightshift.timeutil import fmt_epoch
 from claude_nightshift.usage import fetch_usage
 
 __all__ = [
+    "Outcome",
     "weekly_gate",
     "window_ready",
     "resolve_wait_target",
@@ -37,6 +39,27 @@ RESET_GRACE_SECONDS = 30
 # Consecutive pre-session waits before giving up on the 5-hour gate and running
 # anyway. Bounds the loop if a usage source is stuck reporting a spent window.
 MAX_WINDOW_DEFERRALS = 3
+
+
+class Outcome(enum.IntEnum):
+    """How a run ended. The value is the process exit code.
+
+    1 and 2 keep their usual meanings (generic failure, and the usage error
+    argparse already exits with); 130 is the shell convention for SIGINT.
+    """
+
+    COMPLETED = 0  # the task finished
+    FAILED = 1  # Claude failed, retries ran out, or usage could not be read
+    WEEKLY_LIMIT = 3  # --threshold reached: no budget left this week
+    RUN_BUDGET = 4  # this run's window budget is spent, task unfinished
+    INTERRUPTED = 130  # stopped by the user
+
+
+def _stopped_outcome():
+    """Map a stop request (watchdog or SIGINT) to an Outcome."""
+    if control.stop_kind() == "weekly_limit":
+        return Outcome.WEEKLY_LIMIT
+    return Outcome.INTERRUPTED
 
 
 def watchdog_thread(threshold, interval) -> None:
@@ -64,7 +87,7 @@ def watchdog_thread(threshold, interval) -> None:
                 f"7-day usage {usage.weekly_pct:.1f}% reached threshold {threshold}%"
             )
             logger.warning(f"[watchdog] 🛑 {reason} — stopping Claude")
-            control.set_stop(reason)
+            control.set_stop(reason, kind="weekly_limit")
             control.terminate_process(control.get_current_process())
             break
 
@@ -183,7 +206,7 @@ def run(
     allow_unknown=False,
     min_window_left=DEFAULT_MIN_WINDOW_LEFT,
 ):
-    """Run `command` to completion, waiting out limits. True if the task finished."""
+    """Run `command` to completion, waiting out limits. Returns an :class:`Outcome`."""
     original_task = extract_task_from_command(command)
 
     # Inject the status-file instruction so Claude writes progress before the
@@ -201,7 +224,7 @@ def run(
     while retries < max_retries:
         if control.should_stop():
             logger.info(f"Stopped before retry: {control.stop_reason()}")
-            return False
+            return _stopped_outcome()
 
         # --- the gate: may we start another session? ---
         allowed, reason, usage = weekly_gate(
@@ -212,7 +235,11 @@ def run(
             window_start_usage = usage
         if not allowed:
             logger.warning(f"🛑 Not starting another session: {reason}")
-            return False
+            if budget.stop_kind == "run_budget":
+                return Outcome.RUN_BUDGET
+            if budget.stop_kind == "weekly_limit":
+                return Outcome.WEEKLY_LIMIT
+            return Outcome.FAILED
         logger.info(f"Gate open: {reason}")
 
         # --- the 5-hour gate: is there a window to run in? ---
@@ -231,7 +258,7 @@ def run(
             )
             if control.interruptible_sleep(wait_seconds):
                 logger.info(f"Stopped during wait: {control.stop_reason()}")
-                return False
+                return _stopped_outcome()
             cached_usage = None  # stale after the wait; force a fresh reading
             continue
         else:
@@ -259,13 +286,13 @@ def run(
 
         if control.should_stop():
             logger.info(f"\n🛑 Stopped by watchdog: {control.stop_reason()}")
-            return False
+            return _stopped_outcome()
 
         outcome = classify(session)
 
         if outcome == "success":
             logger.info("✅ Task completed successfully.")
-            return True
+            return Outcome.COMPLETED
 
         if outcome == "limit":
             budget.note_window(window_start_usage, session.usage, session.duration)
@@ -284,7 +311,7 @@ def run(
 
             if control.interruptible_sleep(wait_seconds):
                 logger.info(f"Stopped during wait: {control.stop_reason()}")
-                return False
+                return _stopped_outcome()
 
             # Usage is stale after a multi-hour sleep; force a fresh check.
             cached_usage = None
@@ -308,11 +335,11 @@ def run(
             )
             if control.interruptible_sleep(backoff):
                 logger.info(f"Stopped during backoff: {control.stop_reason()}")
-                return False
+                return _stopped_outcome()
             continue
 
         logger.error(f"Claude exited with code {session.returncode}.")
-        return False
+        return Outcome.FAILED
 
     logger.error("Max retries reached.")
-    return False
+    return Outcome.FAILED

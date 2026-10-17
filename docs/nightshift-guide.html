@@ -600,7 +600,22 @@ Gate open: 7-day usage 22.0%, run ceiling 39.3%, window 1/2</code></pre>
           </tbody>
         </table>
       </div>
-      <p>Exit code is <code>0</code> only when the task actually completed.</p>
+      <p>Exit code is <code>0</code> only when the task actually completed. The other codes say why the run stopped:</p>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Exit code</th><th>Meaning</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>0</code></td><td>The task completed.</td></tr>
+            <tr><td><code>1</code></td><td>Failed: Claude error, retries exhausted, or usage unreadable.</td></tr>
+            <tr><td><code>2</code></td><td>Usage error: bad arguments, unreadable or empty <code>--task-file</code>.</td></tr>
+            <tr><td><code>3</code></td><td>Weekly limit: <code>--threshold</code> reached. Nothing else should start this week.</td></tr>
+            <tr><td><code>4</code></td><td>Run budget spent (<code>-w N</code> or <code>-w auto</code>), task not finished. Run it again later.</td></tr>
+            <tr><td><code>130</code></td><td>Interrupted.</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section id="context">
@@ -630,6 +645,7 @@ Gate open: 7-day usage 22.0%, run ceiling 39.3%, window 1/2</code></pre>
             <tr><th>Flag</th><th>Default</th><th>Purpose</th></tr>
           </thead>
           <tbody>
+            <tr><td><code>-f, --task-file</code></td><td>-</td><td>Read the task prompt from a file, <code>-</code> for stdin.</td></tr>
             <tr><td><code>-t, --threshold</code></td><td>70</td><td>Weekly % at or above which no new session starts.</td></tr>
             <tr><td><code>-w, --max-windows</code></td><td>none</td><td><code>N</code> or <code>auto</code>. Caps what one run may spend.</td></tr>
             <tr><td><code>--horizon</code></td><td>12h</td><td>How long the run is left unattended. Feeds <code>auto</code>.</td></tr>

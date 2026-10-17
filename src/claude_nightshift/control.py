@@ -19,6 +19,7 @@ __all__ = [
     "set_stop",
     "should_stop",
     "stop_reason",
+    "stop_kind",
     "reset",
     "interruptible_sleep",
     "terminate_process",
@@ -28,6 +29,7 @@ _lock = threading.Lock()
 _current_process = None  # the live claude subprocess
 _stop_flag = False  # set when the watchdog or the user asks us to stop
 _stop_reason = ""  # human-readable reason for stopping
+_stop_kind = ""  # machine-readable: "interrupted" or "weekly_limit"
 
 
 def set_current_process(proc) -> None:
@@ -41,11 +43,12 @@ def get_current_process():
         return _current_process
 
 
-def set_stop(reason: str) -> None:
-    global _stop_flag, _stop_reason
+def set_stop(reason: str, kind: str = "interrupted") -> None:
+    global _stop_flag, _stop_reason, _stop_kind
     with _lock:
         _stop_flag = True
         _stop_reason = reason
+        _stop_kind = kind
 
 
 def should_stop() -> bool:
@@ -58,13 +61,19 @@ def stop_reason() -> str:
         return _stop_reason
 
 
+def stop_kind() -> str:
+    with _lock:
+        return _stop_kind
+
+
 def reset() -> None:
     """Clear all run-control state. Used by tests and by repeated in-process runs."""
-    global _current_process, _stop_flag, _stop_reason
+    global _current_process, _stop_flag, _stop_reason, _stop_kind
     with _lock:
         _current_process = None
         _stop_flag = False
         _stop_reason = ""
+        _stop_kind = ""
 
 
 def interruptible_sleep(seconds: float) -> bool:

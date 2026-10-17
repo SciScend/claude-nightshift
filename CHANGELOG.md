@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Distinct exit codes, so a wrapper can tell why a run stopped: `0` completed,
+  `1` failed, `2` usage error, `3` weekly limit (`--threshold`) reached, `4` run
+  budget (`-w N` / `-w auto`) spent with the task unfinished, `130`
+  interrupted. Previously every stop other than completion or Ctrl-C exited `1`.
+- `-f/--task-file FILE` reads the task prompt from a file, or from stdin with
+  `-f -`.
+
 ## 1.0.0 - unreleased
 
 First public release.

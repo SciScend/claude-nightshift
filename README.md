@@ -58,9 +58,22 @@ claude-nightshift -w 2 "big refactor"
 
 # See what would run, change nothing
 claude-nightshift --dry-run "some task"
+
+# Long prompt from a file (or `-f -` for stdin)
+claude-nightshift -w auto --horizon 10h -f task.md
 ```
 
-Exit code is `0` only when the task actually completed.
+Exit code is `0` only when the task actually completed. The other codes tell a
+script (a queue, a cron job) why the run stopped:
+
+| Exit code | Meaning | What a wrapper should do |
+|---|---|---|
+| `0` | The task completed. | Mark it done. |
+| `1` | Failed: Claude exited with an error, `--max-retries` ran out, or usage could not be read. | Look at the log. |
+| `2` | Usage error: bad arguments (argparse), unreadable or empty `--task-file`. | Fix the command. |
+| `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
+| `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
+| `130` | Interrupted (Ctrl-C). | Stop. |
 
 > **Heads up:** every session runs with `--dangerously-skip-permissions`, because
 > nobody is there to approve tool calls. Run it on work you are willing to leave

@@ -18,7 +18,7 @@ from claude_nightshift.budget import (
     MIN_WINDOW_SECONDS,
     Budget,
 )
-from claude_nightshift.runner import MAX_WINDOW_DEFERRALS, run, window_ready
+from claude_nightshift.runner import MAX_WINDOW_DEFERRALS, Outcome, run, window_ready
 from claude_nightshift.session import SessionResult
 from claude_nightshift.status import STATUS_FILE
 from claude_nightshift.usage import Usage
@@ -254,7 +254,8 @@ def test_regression_run_survives_a_spent_window(script):
     )
     budget = Budget(70.0, max_windows="auto", horizon=10 * 3600)
 
-    assert run(["claude", "-p", "do the thing"], budget, max_retries=10)
+    outcome = run(["claude", "-p", "do the thing"], budget, max_retries=10)
+    assert outcome == Outcome.COMPLETED
     assert budget.max_windows == 1
     assert budget.windows_used == 0, "a wait must not cost a window"
     assert len(script.commands) == 1, "exactly one session should run"
@@ -279,7 +280,10 @@ def test_stub_session_does_not_exhaust_the_window_budget(script, saved_samples):
     )
     budget = Budget(70.0, max_windows="auto", horizon=20 * 3600)
 
-    assert run(["claude", "-p", "do the thing"], budget, max_retries=10, min_window_left=0)
+    outcome = run(
+        ["claude", "-p", "do the thing"], budget, max_retries=10, min_window_left=0
+    )
+    assert outcome == Outcome.COMPLETED
     assert budget.windows_used == 0
     assert saved_samples() == [], "a stub prices nothing"
     assert len(script.commands) == 2, "the run must reach a real window"
@@ -303,9 +307,10 @@ def test_stub_still_counts_against_the_weekly_ceiling(script):
     )
     budget = Budget(70.0, max_windows="auto", horizon=10 * 3600)
 
-    assert not run(
+    outcome = run(
         ["claude", "-p", "do the thing"], budget, max_retries=10, min_window_left=0
     )
+    assert outcome == Outcome.RUN_BUDGET, "the auto run ceiling, not the weekly limit"
     assert budget.windows_used == 0, "still not a window"
     assert budget.run_ceiling == pytest.approx(32.5, abs=0.05)
 
@@ -325,7 +330,8 @@ def test_a_real_window_is_still_counted_and_stops_the_run(script, saved_samples)
     )
     budget = Budget(70.0, max_windows="auto", horizon=10 * 3600)
 
-    assert not run(["claude", "-p", "do the thing"], budget, max_retries=10)
+    outcome = run(["claude", "-p", "do the thing"], budget, max_retries=10)
+    assert outcome == Outcome.RUN_BUDGET
     assert budget.windows_used == 1
     assert saved_samples() == [8.0]
 
@@ -339,7 +345,8 @@ def test_deferrals_are_bounded(script):
         ],
         sessions=[success_session()],
     )
-    assert run(["claude", "-p", "do the thing"], Budget(70.0), max_retries=10)
+    outcome = run(["claude", "-p", "do the thing"], Budget(70.0), max_retries=10)
+    assert outcome == Outcome.COMPLETED
     assert len(script.sleeps) == MAX_WINDOW_DEFERRALS
     assert len(script.commands) == 1
 
@@ -351,3 +358,70 @@ def test_status_instruction_is_still_injected(script):
     )
     run(["claude", "-p", "do the thing"], Budget(70.0), max_retries=10)
     assert STATUS_FILE in script.commands[0][-1]
+
+
+# 4. How a run ends: the outcome is the exit code
+
+
+def failed_session():
+    s = SessionResult()
+    s.returncode = 1
+    s.output_text = "Error: something went badly wrong"
+    s.duration = 60
+    return s
+
+
+def test_weekly_threshold_at_the_gate_is_a_weekly_limit(script):
+    script(usages=[usage(weekly=71.0, five=0.0)], sessions=[])
+    outcome = run(["claude", "-p", "do the thing"], Budget(70.0), max_retries=10)
+    assert outcome == Outcome.WEEKLY_LIMIT
+    assert int(outcome) == 3
+    assert script.commands == []
+
+
+def test_overshooting_the_threshold_is_a_weekly_limit(script):
+    """-w N implies --no-overshoot against the threshold itself."""
+    script(usages=[usage(weekly=65.0, five=0.0)], sessions=[])
+    outcome = run(["claude", "-p", "x"], Budget(70.0, max_windows=2), max_retries=10)
+    assert outcome == Outcome.WEEKLY_LIMIT
+
+
+def test_max_windows_spent_is_a_run_budget_stop(script):
+    script(
+        usages=[
+            usage(weekly=24.0, five=0.0, five_resets_in=FIVE_HOURS),
+            usage(weekly=32.0, five=0.0, five_resets_in=FIVE_HOURS),
+        ],
+        sessions=[limit_session(4 * 3600, weekly_after=32.0)],
+    )
+    outcome = run(["claude", "-p", "x"], Budget(70.0, max_windows=1), max_retries=10)
+    assert outcome == Outcome.RUN_BUDGET
+    assert int(outcome) == 4
+
+
+def test_unreadable_usage_is_a_failure(script):
+    script(usages=[None], sessions=[])
+    outcome = run(["claude", "-p", "x"], Budget(70.0), max_retries=10)
+    assert outcome == Outcome.FAILED
+
+
+def test_claude_error_is_a_failure(script):
+    script(usages=[usage(weekly=24.0, five=0.0)], sessions=[failed_session()])
+    outcome = run(["claude", "-p", "x"], Budget(70.0), max_retries=10)
+    assert outcome == Outcome.FAILED
+    assert int(outcome) == 1
+
+
+def test_watchdog_stop_is_a_weekly_limit(script):
+    control.set_stop("7-day usage 71% reached threshold 70%", kind="weekly_limit")
+    script(usages=[], sessions=[])
+    outcome = run(["claude", "-p", "x"], Budget(70.0), max_retries=10)
+    assert outcome == Outcome.WEEKLY_LIMIT
+
+
+def test_user_stop_is_an_interrupt(script):
+    control.set_stop("interrupted by user")
+    script(usages=[], sessions=[])
+    outcome = run(["claude", "-p", "x"], Budget(70.0), max_retries=10)
+    assert outcome == Outcome.INTERRUPTED
+    assert int(outcome) == 130

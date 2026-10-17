@@ -11,10 +11,15 @@ import threading
 from claude_nightshift import __version__, control
 from claude_nightshift.budget import DEFAULT_MIN_WINDOW_LEFT, Budget, max_windows_arg
 from claude_nightshift.logsetup import get_logger, setup_logging
-from claude_nightshift.runner import SKIP_PERMISSIONS_FLAG, run, watchdog_thread
+from claude_nightshift.runner import (
+    SKIP_PERMISSIONS_FLAG,
+    Outcome,
+    run,
+    watchdog_thread,
+)
 from claude_nightshift.timeutil import parse_duration
 
-__all__ = ["build_parser", "build_claude_command", "main"]
+__all__ = ["build_parser", "build_claude_command", "load_task_file", "main"]
 
 logger = get_logger(__name__)
 
@@ -25,6 +30,7 @@ DESCRIPTION = (
 
 EPILOG = """Examples:
   claude-nightshift "fix all lint errors"
+  claude-nightshift -f task.md -w auto --horizon 10h
   claude-nightshift -t 85 --model opus "refactor auth"
   claude-nightshift -t 90 --effort medium "long refactor"
   claude-nightshift -w auto --horizon 20h "big refactor"
@@ -38,6 +44,14 @@ session is never interrupted unless you pass --hard-stop.
 remaining weekly budget evenly over the time left before it resets.
 Usage figures are read from Claude's own stream, then the OAuth usage
 endpoint, then cclimits — none of them cost tokens.
+
+Exit codes:
+  0    task completed
+  1    failed: Claude error, retries exhausted, or usage unreadable
+  2    usage error (bad arguments)
+  3    weekly limit: --threshold reached, no budget left this week
+  4    run budget spent (-w N or -w auto), task not finished yet
+  130  interrupted
 """
 
 
@@ -58,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("task", nargs="?", default=None,
                         help="Task prompt for Claude (quoted string)")
+    parser.add_argument("-f", "--task-file", type=str, default=None, metavar="FILE",
+                        help="Read the task prompt from FILE ('-' for stdin) instead "
+                             "of the positional argument")
     parser.add_argument("-V", "--version", action="version",
                         version=f"claude-nightshift {__version__}")
     parser.add_argument("-t", "--threshold", type=float, default=70.0,
@@ -124,6 +141,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the command that would be run, then exit")
     return parser
+
+
+def load_task_file(path):
+    """Read a task prompt from ``path``, or from stdin when it is ``-``.
+
+    Raises ``ValueError`` with a user-facing message when the file cannot be
+    read or holds nothing but whitespace.
+    """
+    try:
+        if path == "-":
+            text = sys.stdin.read()
+        else:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot read task file {path!r}: {exc}") from None
+    text = text.strip()
+    if not text:
+        raise ValueError(f"task file {path!r} is empty")
+    return text
 
 
 def build_base_flags(args, structured):
@@ -202,7 +239,7 @@ def install_sigint_handler() -> None:
         logger.info("\nInterrupted by user.")
         control.set_stop("interrupted by user")
         control.terminate_process(control.get_current_process(), grace=5)
-        sys.exit(130)
+        sys.exit(int(Outcome.INTERRUPTED))
 
     signal.signal(signal.SIGINT, handle_sigint)
 
@@ -213,6 +250,14 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.claude_raw = claude_raw
+
+    if args.task_file is not None:
+        if args.task is not None:
+            parser.error("give the task either as an argument or with -f, not both")
+        try:
+            args.task = load_task_file(args.task_file)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     structured = not args.raw_output
     base_flags = build_base_flags(args, structured)
@@ -252,7 +297,7 @@ def main(argv=None) -> int:
 
     install_sigint_handler()
 
-    success = run(
+    outcome = run(
         claude_cmd,
         budget,
         max_retries=args.max_retries,
@@ -263,7 +308,7 @@ def main(argv=None) -> int:
         allow_unknown=args.allow_unknown_usage,
         min_window_left=args.min_window_left,
     )
-    return 0 if success else 1
+    return int(outcome)
 
 
 def run_cli() -> None:

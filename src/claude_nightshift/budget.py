@@ -150,6 +150,10 @@ class Budget:
         # only once it already has.
         self.predictive = bool(predictive or max_windows is not None)
 
+        # Why the last check() refused: "run_budget" (this run's share is spent:
+        # --max-windows or the auto run ceiling) or "weekly_limit" (--threshold).
+        self.stop_kind = None
+
         self.samples = load_cost_samples()
         measured = median(self.samples)
         self.window_cost = measured if measured else DEFAULT_WINDOW_COST
@@ -208,16 +212,20 @@ class Budget:
     def check(self, usage):
         """May another session start? Returns ``(allowed, reason)``."""
         pct = usage.weekly_pct
+        self.stop_kind = None
 
         if self.max_windows is not None and self.windows_used >= self.max_windows:
+            self.stop_kind = "run_budget"
             return False, (
                 f"window budget spent — {self.windows_used} of "
                 f"{self.max_windows} five-hour window(s) used"
             )
 
         name = "run ceiling" if self.run_ceiling < self.threshold else "threshold"
+        refused_kind = "run_budget" if name == "run ceiling" else "weekly_limit"
 
         if pct >= self.run_ceiling:
+            self.stop_kind = "weekly_limit" if pct >= self.threshold else refused_kind
             return False, (
                 f"7-day usage {pct:.1f}% is at or above the {name} "
                 f"{self.run_ceiling:.1f}%"
@@ -231,6 +239,7 @@ class Budget:
                     if self.cost_is_measured
                     else " — estimated, refined after the first full window"
                 )
+                self.stop_kind = refused_kind
                 return False, (
                     f"another window would reach ~{projected:.1f}% "
                     f"({pct:.1f}% + {self.window_cost:.1f}%{note}), past the "

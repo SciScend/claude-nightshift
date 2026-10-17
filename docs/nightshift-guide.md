@@ -217,7 +217,17 @@ enforced — always the *lower* of your threshold and the auto allowance.
 | `5-hour window is X% spent … Waiting for it to reset` | Not a stop — a wait. The next window is worth more than the minutes left in this one. |
 | `weekly usage could not be determined` | Couldn't read usage; stopping rather than running blind. `--allow-unknown-usage` flips this. |
 
-Exit code is `0` only when the task actually completed.
+Exit code is `0` only when the task actually completed. The other codes say
+why the run stopped, so a script can decide what to do next:
+
+| Exit code | Meaning | What a wrapper should do |
+|---|---|---|
+| `0` | The task completed. | Mark it done. |
+| `1` | Failed: Claude exited with an error, `--max-retries` ran out, or usage could not be read. | Look at the log. |
+| `2` | Usage error: bad arguments (argparse), unreadable or empty `--task-file`. | Fix the command. |
+| `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
+| `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
+| `130` | Interrupted (Ctrl-C). | Stop. |
 
 ---
 
@@ -278,6 +288,7 @@ Everything after `--` is passed to `claude` verbatim; nightshift only adds
 
 | Flag | Default | Purpose |
 |---|---|---|
+| `-f, --task-file FILE` | - | Read the task prompt from a file, `-` for stdin. Not together with a task argument. |
 | `--min-window-left` | 5 | Minimum % of the 5-hour window left before a session may start; `0` disables. |
 | `-r, --max-retries` | 10 | Resume attempts across limits and turn caps. |
 | `--usage-max-age` | 120 | How long a usage reading from the stream stays fresh before re-querying. |
