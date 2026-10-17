@@ -10,10 +10,10 @@ from claude_nightshift.budget import DEFAULT_MIN_WINDOW_LEFT, FIVE_HOURS
 from claude_nightshift.logsetup import get_logger
 from claude_nightshift.session import classify, run_session
 from claude_nightshift.status import (
-    STATUS_INSTRUCTION,
     extract_task_from_command,
     inject_prompt,
     read_status_file,
+    status_instruction,
 )
 from claude_nightshift.timeutil import fmt_epoch
 from claude_nightshift.usage import fetch_usage
@@ -49,9 +49,10 @@ class Outcome(enum.IntEnum):
     """
 
     COMPLETED = 0  # the task finished
-    FAILED = 1  # Claude failed, retries ran out, or usage could not be read
+    FAILED = 1  # Claude failed or retries ran out
     WEEKLY_LIMIT = 3  # --threshold reached: no budget left this week
     RUN_BUDGET = 4  # this run's window budget is spent, task unfinished
+    USAGE_UNKNOWN = 5  # weekly usage could not be read, so no session was started
     INTERRUPTED = 130  # stopped by the user
 
 
@@ -175,12 +176,12 @@ def build_resume_command(retries, compress_after, session_id, original_task, bas
 
     if retries < compress_after and session_id:
         # Full context resume — continue the real conversation by id.
-        cmd.extend(["--resume", session_id, "-p", "continue" + STATUS_INSTRUCTION])
+        cmd.extend(["--resume", session_id, "-p", "continue" + status_instruction()])
         return cmd, f"full context (--resume {session_id[:8]})"
 
     if retries < compress_after:
         # No session id captured; fall back to "most recent in this directory".
-        cmd.extend(["-c", "-p", "continue" + STATUS_INSTRUCTION])
+        cmd.extend(["-c", "-p", "continue" + status_instruction()])
         return cmd, "full context (-c)"
 
     # Compressed context resume — fresh start seeded with the status summary.
@@ -190,7 +191,7 @@ def build_resume_command(retries, compress_after, session_id, original_task, bas
         parts.append(f"Original task: {original_task}")
     if status:
         parts.append(f"Progress from previous session:\n\n{status}")
-    parts.append("Continue where you left off." + STATUS_INSTRUCTION)
+    parts.append("Continue where you left off." + status_instruction())
     cmd.extend(["-p", "\n\n".join(parts)])
     return cmd, "compressed context (fresh)"
 
@@ -212,7 +213,7 @@ def run(
     # Inject the status-file instruction so Claude writes progress before the
     # session ends; that summary is what a compressed resume is seeded with.
     if original_task:
-        command = inject_prompt(command, STATUS_INSTRUCTION)
+        command = inject_prompt(command, status_instruction())
 
     first_run = True
     retries = 0
@@ -239,6 +240,8 @@ def run(
                 return Outcome.RUN_BUDGET
             if budget.stop_kind == "weekly_limit":
                 return Outcome.WEEKLY_LIMIT
+            if usage is None:
+                return Outcome.USAGE_UNKNOWN
             return Outcome.FAILED
         logger.info(f"Gate open: {reason}")
 

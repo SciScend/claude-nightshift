@@ -399,10 +399,11 @@ def test_max_windows_spent_is_a_run_budget_stop(script):
     assert int(outcome) == 4
 
 
-def test_unreadable_usage_is_a_failure(script):
+def test_unreadable_usage_has_its_own_outcome(script):
     script(usages=[None], sessions=[])
     outcome = run(["claude", "-p", "x"], Budget(70.0), max_retries=10)
-    assert outcome == Outcome.FAILED
+    assert outcome == Outcome.USAGE_UNKNOWN
+    assert int(outcome) == 5
 
 
 def test_claude_error_is_a_failure(script):

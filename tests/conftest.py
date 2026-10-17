@@ -1,6 +1,6 @@
 import pytest
 
-from claude_nightshift import control
+from claude_nightshift import control, status
 from claude_nightshift.budget import STATE_PATH_ENV
 
 
@@ -10,5 +10,7 @@ def isolated_state(tmp_path, monkeypatch):
     path = tmp_path / "nightshift-state.json"
     monkeypatch.setenv(STATE_PATH_ENV, str(path))
     control.reset()
+    status.set_status_file(None)
     yield path
     control.reset()
+    status.set_status_file(None)

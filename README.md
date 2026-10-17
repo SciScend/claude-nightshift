@@ -61,6 +61,9 @@ claude-nightshift --dry-run "some task"
 
 # Long prompt from a file (or `-f -` for stdin)
 claude-nightshift -w auto --horizon 10h -f task.md
+
+# Current usage as JSON, for scripts (costs no tokens)
+claude-nightshift --usage-json
 ```
 
 Exit code is `0` only when the task actually completed. The other codes tell a
@@ -69,10 +72,11 @@ script (a queue, a cron job) why the run stopped:
 | Exit code | Meaning | What a wrapper should do |
 |---|---|---|
 | `0` | The task completed. | Mark it done. |
-| `1` | Failed: Claude exited with an error, `--max-retries` ran out, or usage could not be read. | Look at the log. |
+| `1` | Failed: Claude exited with an error, or `--max-retries` ran out. | Look at the log. |
 | `2` | Usage error: bad arguments (argparse), unreadable or empty `--task-file`. | Fix the command. |
 | `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
 | `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
+| `5` | Weekly usage could not be read, so no session was started (see `--allow-unknown-usage`). | Stop; it is an environment problem (login, network), not the task. |
 | `130` | Interrupted (Ctrl-C). | Stop. |
 
 > **Heads up:** every session runs with `--dangerously-skip-permissions`, because
@@ -117,7 +121,9 @@ summary Claude writes to `.nightshift-status.md` before each session ends — so
 all-night run does not drag a growing transcript behind it.
 
 Add `.nightshift-status.md` to your `.gitignore`, or commit it; it is the handoff
-between sessions and is rewritten constantly.
+between sessions and is rewritten constantly. `--status-file PATH` puts it
+somewhere else, for example outside the repository, or one file per task when
+several tasks share a folder.
 
 ---
 

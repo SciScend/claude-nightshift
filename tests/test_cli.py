@@ -1,8 +1,9 @@
 import io
+import json
 
 import pytest
 
-from claude_nightshift import __version__, cli
+from claude_nightshift import __version__, cli, status
 from claude_nightshift.cli import (
     build_base_flags,
     build_claude_command,
@@ -134,6 +135,7 @@ def test_missing_or_empty_task_file_is_a_usage_error(tmp_path, capsys, content):
         (Outcome.FAILED, 1),
         (Outcome.WEEKLY_LIMIT, 3),
         (Outcome.RUN_BUDGET, 4),
+        (Outcome.USAGE_UNKNOWN, 5),
         (Outcome.INTERRUPTED, 130),
     ],
 )
@@ -141,3 +143,44 @@ def test_main_returns_the_outcome_as_exit_code(monkeypatch, outcome, code):
     monkeypatch.setattr(cli, "install_sigint_handler", lambda: None)
     monkeypatch.setattr(cli, "run", lambda *a, **k: outcome)
     assert main(["some task"]) == code
+
+
+# --usage-json and --status-file
+
+
+def test_usage_json_prints_both_windows(monkeypatch, capsys):
+    from claude_nightshift.usage import Usage
+
+    snapshot = Usage(weekly_pct=42.0, weekly_resets=1800000000, five_hour_pct=10.0,
+                     five_hour_resets=1700000000, source="test", observed_at=1.0)
+    monkeypatch.setattr(cli, "fetch_usage", lambda attempts=3: snapshot)
+    assert main(["--usage-json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data == {
+        "weekly_pct": 42.0,
+        "weekly_resets": 1800000000,
+        "five_hour_pct": 10.0,
+        "five_hour_resets": 1700000000,
+        "source": "test",
+        "observed_at": 1.0,
+    }
+
+
+def test_usage_json_exits_5_when_usage_is_unreadable(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "fetch_usage", lambda attempts=3: None)
+    assert main(["--usage-json"]) == 5
+    assert "error" in json.loads(capsys.readouterr().out)
+
+
+def test_status_file_flag_sets_the_status_file(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(cli, "install_sigint_handler", lambda: None)
+
+    def fake_run(*a, **k):
+        seen["path"] = status.status_file()
+        return Outcome.COMPLETED
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    target = str(tmp_path / "s.md")
+    assert main(["--status-file", target, "some task"]) == 0
+    assert seen["path"] == target

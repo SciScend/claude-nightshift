@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import signal
 import sys
 import threading
@@ -17,9 +18,17 @@ from claude_nightshift.runner import (
     run,
     watchdog_thread,
 )
+from claude_nightshift.status import set_status_file
 from claude_nightshift.timeutil import parse_duration
+from claude_nightshift.usage import fetch_usage
 
-__all__ = ["build_parser", "build_claude_command", "load_task_file", "main"]
+__all__ = [
+    "build_parser",
+    "build_claude_command",
+    "load_task_file",
+    "usage_as_json",
+    "main",
+]
 
 logger = get_logger(__name__)
 
@@ -36,6 +45,7 @@ EPILOG = """Examples:
   claude-nightshift -w auto --horizon 20h "big refactor"
   claude-nightshift -w 2 "spend at most two 5h windows"
   claude-nightshift --resume
+  claude-nightshift --usage-json
   claude-nightshift -- claude -p "task" --allowedTools Edit
 
 The weekly threshold is checked before each session starts; a running
@@ -47,10 +57,11 @@ endpoint, then cclimits — none of them cost tokens.
 
 Exit codes:
   0    task completed
-  1    failed: Claude error, retries exhausted, or usage unreadable
+  1    failed: Claude error or retries exhausted
   2    usage error (bad arguments)
   3    weekly limit: --threshold reached, no budget left this week
   4    run budget spent (-w N or -w auto), task not finished yet
+  5    weekly usage could not be read, no session started
   130  interrupted
 """
 
@@ -118,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Log all output to nightshift_YYYYMMDD_HHMMSS.log")
     parser.add_argument("--log-file", type=str, default=None, metavar="FILE",
                         help="Log all output to a specific file")
+    parser.add_argument("--status-file", type=str, default=None, metavar="FILE",
+                        help="Where Claude writes its progress summary between "
+                             "sessions (default: .nightshift-status.md in the "
+                             "working directory)")
+    parser.add_argument("--usage-json", action="store_true",
+                        help="Print the current 5-hour and 7-day usage as JSON and "
+                             "exit (exit 5 if it cannot be read). Costs no tokens")
     parser.add_argument("--max-turns", type=int, default=None, metavar="N",
                         help="Max agentic turns per Claude session. Hitting it ends the "
                              "session and nightshift resumes, it is not an error")
@@ -161,6 +179,27 @@ def load_task_file(path):
     if not text:
         raise ValueError(f"task file {path!r} is empty")
     return text
+
+
+def usage_as_json(usage):
+    """The ``--usage-json`` document for a Usage snapshot."""
+    return json.dumps({
+        "weekly_pct": usage.weekly_pct,
+        "weekly_resets": usage.weekly_resets,
+        "five_hour_pct": usage.five_hour_pct,
+        "five_hour_resets": usage.five_hour_resets,
+        "source": usage.source,
+        "observed_at": usage.observed_at,
+    })
+
+
+def print_usage_json() -> int:
+    usage = fetch_usage(attempts=1)
+    if usage is None or usage.weekly_pct is None:
+        print(json.dumps({"error": "usage could not be read"}))
+        return int(Outcome.USAGE_UNKNOWN)
+    print(usage_as_json(usage))
+    return 0
 
 
 def build_base_flags(args, structured):
@@ -224,6 +263,8 @@ def log_banner(args, budget, claude_cmd) -> None:
             f"  5-hour gate   : need {args.min_window_left:.0f}% of the "
             f"window left to start"
         )
+    if args.status_file:
+        logger.info(f"  Status file   : {args.status_file}")
     logger.info(f"  Max retries   : {args.max_retries}")
     logger.info(f"  Compress after: {args.compress_after} resumes")
     if args.effort:
@@ -250,6 +291,11 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     args.claude_raw = claude_raw
+
+    if args.usage_json:
+        return print_usage_json()
+
+    set_status_file(args.status_file)
 
     if args.task_file is not None:
         if args.task is not None:

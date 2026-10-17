@@ -8,6 +8,13 @@
   interrupted. Previously every stop other than completion or Ctrl-C exited `1`.
 - `-f/--task-file FILE` reads the task prompt from a file, or from stdin with
   `-f -`.
+- Exit code `5` when weekly usage cannot be read and no session is started.
+  It was part of `1` before; a wrapper can now tell an environment problem
+  from a failed task.
+- `--status-file FILE` sets where the progress summary between sessions is
+  written (default `.nightshift-status.md` in the working directory).
+- `--usage-json` prints the current 5-hour and 7-day usage and reset times as
+  JSON and exits (`5` if usage cannot be read).
 
 ## 1.0.0 - unreleased
 

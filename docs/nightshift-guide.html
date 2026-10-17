@@ -608,10 +608,11 @@ Gate open: 7-day usage 22.0%, run ceiling 39.3%, window 1/2</code></pre>
           </thead>
           <tbody>
             <tr><td><code>0</code></td><td>The task completed.</td></tr>
-            <tr><td><code>1</code></td><td>Failed: Claude error, retries exhausted, or usage unreadable.</td></tr>
+            <tr><td><code>1</code></td><td>Failed: Claude error or retries exhausted.</td></tr>
             <tr><td><code>2</code></td><td>Usage error: bad arguments, unreadable or empty <code>--task-file</code>.</td></tr>
             <tr><td><code>3</code></td><td>Weekly limit: <code>--threshold</code> reached. Nothing else should start this week.</td></tr>
             <tr><td><code>4</code></td><td>Run budget spent (<code>-w N</code> or <code>-w auto</code>), task not finished. Run it again later.</td></tr>
+            <tr><td><code>5</code></td><td>Weekly usage could not be read; no session started.</td></tr>
             <tr><td><code>130</code></td><td>Interrupted.</td></tr>
           </tbody>
         </table>
@@ -660,6 +661,8 @@ Gate open: 7-day usage 22.0%, run ceiling 39.3%, window 1/2</code></pre>
             <tr><td><code>--allow-unknown-usage</code></td><td>off</td><td>Run even when usage can't be read.</td></tr>
             <tr><td><code>--raw-output</code></td><td>off</td><td>Plain text instead of stream-json; English limit matching.</td></tr>
             <tr><td><code>-l, --log</code> / <code>--log-file</code></td><td>off</td><td>Log to <code>nightshift_*.log</code>, or a named file.</td></tr>
+            <tr><td><code>--status-file</code></td><td><code>.nightshift-status.md</code></td><td>Where the progress summary between sessions goes.</td></tr>
+            <tr><td><code>--usage-json</code></td><td>off</td><td>Print current usage as JSON, then exit.</td></tr>
             <tr><td><code>--dry-run</code></td><td>off</td><td>Print the command that would run, then exit.</td></tr>
             <tr><td><code>--hard-stop</code></td><td>off</td><td>Kill a <em>running</em> session at the threshold.</td></tr>
             <tr><td><code>-i, --interval</code></td><td>300</td><td>Poll interval, <code>--hard-stop</code> only.</td></tr>

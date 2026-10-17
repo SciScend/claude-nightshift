@@ -5,6 +5,9 @@ from __future__ import annotations
 __all__ = [
     "STATUS_FILE",
     "STATUS_INSTRUCTION",
+    "set_status_file",
+    "status_file",
+    "status_instruction",
     "read_status_file",
     "extract_task_from_command",
     "inject_prompt",
@@ -12,14 +15,40 @@ __all__ = [
 
 STATUS_FILE = ".nightshift-status.md"
 
-STATUS_INSTRUCTION = (
-    "\n\nBefore your session ends, write a concise progress summary to "
-    f"`{STATUS_FILE}`: what's done, key decisions, and next steps."
-)
+# The file actually used; --status-file changes it.
+_status_path = STATUS_FILE
 
 
-def read_status_file(path: str = STATUS_FILE):
+def _instruction(path):
+    return (
+        "\n\nBefore your session ends, write a concise progress summary to "
+        f"`{path}`: what's done, key decisions, and next steps."
+    )
+
+
+STATUS_INSTRUCTION = _instruction(STATUS_FILE)
+
+
+def set_status_file(path=None):
+    """Use ``path`` as the status file (``None`` restores the default)."""
+    global _status_path
+    _status_path = path or STATUS_FILE
+
+
+def status_file():
+    """The status file in use."""
+    return _status_path
+
+
+def status_instruction():
+    """The instruction appended to prompts, naming the status file in use."""
+    return _instruction(_status_path)
+
+
+def read_status_file(path=None):
     """Read the compressed-context status file, if it exists."""
+    if path is None:
+        path = _status_path
     try:
         with open(path) as f:
             return f.read().strip()

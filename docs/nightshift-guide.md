@@ -223,10 +223,11 @@ why the run stopped, so a script can decide what to do next:
 | Exit code | Meaning | What a wrapper should do |
 |---|---|---|
 | `0` | The task completed. | Mark it done. |
-| `1` | Failed: Claude exited with an error, `--max-retries` ran out, or usage could not be read. | Look at the log. |
+| `1` | Failed: Claude exited with an error, or `--max-retries` ran out. | Look at the log. |
 | `2` | Usage error: bad arguments (argparse), unreadable or empty `--task-file`. | Fix the command. |
 | `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
 | `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
+| `5` | Weekly usage could not be read, so no session was started. | Stop; it is an environment problem (login, network), not the task. |
 | `130` | Interrupted (Ctrl-C). | Stop. |
 
 ---
