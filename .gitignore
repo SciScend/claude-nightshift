@@ -17,5 +17,5 @@ claude_nightshift.log
 nightshift_*.log
 
 # Local AI-assistant files: prompts, reports and instructions
-ai/
+.ai/
 CLAUDE.md
