@@ -1,3 +1,4 @@
+import io
 import json
 import subprocess
 import urllib.error
@@ -60,8 +61,10 @@ def test_cclimits_falls_back_to_text_output(monkeypatch):
 
 
 def test_fetch_usage_falls_back_when_the_endpoint_fails(monkeypatch):
-    # Closed at the end: an HTTPError left to the garbage collector warns.
-    error = urllib.error.HTTPError(usage_mod.USAGE_ENDPOINT, 500, "boom", {}, None)
+    # With a body of its own and closed at the end: an HTTPError left to the
+    # garbage collector warns.
+    error = urllib.error.HTTPError(usage_mod.USAGE_ENDPOINT, 500, "boom", {},
+                                   io.BytesIO(b""))
 
     def broken():
         raise error
