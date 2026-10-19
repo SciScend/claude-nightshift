@@ -110,6 +110,30 @@ window's real cost, and the median of recent samples lives in
 `~/.claude/nightshift-state.json`. After your first run the arithmetic is
 calibrated to your actual workload.
 
+### Several runs at once
+
+All runs on one account share the same 5-hour window and the same weekly pool,
+and the usage figures only say what the account as a whole has spent. To give
+each of several parallel runs its own budget, name the runs and cap them:
+
+```bash
+claude-nightshift --run-id docs --spend 5 -f docs-task.md
+claude-nightshift --run-id api  --spend auto --spend-share 2 -f api-task.md
+```
+
+`--spend PCT` stops the run once its own share of the weekly pool reaches PCT.
+`--spend auto` gives it an even share of what is left below `--threshold`,
+split `--spend-share` ways. Unlike the threshold, the spend budget is also
+checked during a session (every `--spend-interval` seconds, default 120), and a
+session that runs past it is stopped, with exit code `4`.
+
+The runs keep a shared ledger in `~/.claude/nightshift-ledger.json`. Each time
+the weekly figure rises, the rise is split between the runs by the tokens each
+used since the last rise, priced per model (replaced by Claude's exact cost
+when a session ends). It is an estimate: the figures come in whole percent,
+and your own use of Claude during a session is charged to the runs that are in
+one. `--usage-json` lists the runs with what each spent and its budget.
+
 ---
 
 ## Long runs without unbounded context

@@ -60,14 +60,20 @@ def test_cclimits_falls_back_to_text_output(monkeypatch):
 
 
 def test_fetch_usage_falls_back_when_the_endpoint_fails(monkeypatch):
+    # Closed at the end: an HTTPError left to the garbage collector warns.
+    error = urllib.error.HTTPError(usage_mod.USAGE_ENDPOINT, 500, "boom", {}, None)
+
     def broken():
-        raise urllib.error.HTTPError(usage_mod.USAGE_ENDPOINT, 500, "boom", {}, None)
+        raise error
 
     monkeypatch.setattr(usage_mod, "fetch_usage_native", broken)
     monkeypatch.setattr(
         usage_mod, "fetch_usage_cclimits", lambda: Usage(weekly_pct=7, source="cclimits")
     )
-    assert usage_mod.fetch_usage().source == "cclimits"
+    try:
+        assert usage_mod.fetch_usage().source == "cclimits"
+    finally:
+        error.close()
 
 
 def test_fetch_usage_gives_up_with_none(monkeypatch):

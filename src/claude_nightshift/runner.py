@@ -25,6 +25,7 @@ __all__ = [
     "resolve_wait_target",
     "build_resume_command",
     "watchdog_thread",
+    "spend_watch_thread",
     "run",
 ]
 
@@ -60,6 +61,8 @@ def _stopped_outcome():
     """Map a stop request (watchdog or SIGINT) to an Outcome."""
     if control.stop_kind() == "weekly_limit":
         return Outcome.WEEKLY_LIMIT
+    if control.stop_kind() == "run_budget":
+        return Outcome.RUN_BUDGET
     return Outcome.INTERRUPTED
 
 
@@ -95,6 +98,35 @@ def watchdog_thread(threshold, interval) -> None:
     logger.info("[watchdog] Exited")
 
 
+def spend_watch_thread(budget, interval) -> None:
+    """Stop a *running* session once this run's ``--spend`` budget is used.
+
+    Unlike the threshold, a run's spend budget is enforced during a session:
+    with several runs sharing the pool, one that ran on past its budget would
+    spend what the others were given. The usage endpoint is asked only when no
+    run has recorded a reading in the last ``interval`` seconds.
+    """
+    ledger = budget.ledger
+    while not control.interruptible_sleep(interval):
+        if control.get_current_process() is None or budget.spend_cap is None:
+            continue
+        age = ledger.last_reading_age()
+        if age is None or age >= interval:
+            ledger.observe(fetch_usage(attempts=1))
+        else:
+            # Pick up what the other runs' readings attributed to this one.
+            ledger.refresh()
+        if ledger.spent >= budget.spend_cap:
+            reason = (
+                f"this run spent {ledger.spent:.1f}% of the weekly pool, its "
+                f"budget is {budget.spend_cap:.1f}%"
+            )
+            logger.warning(f"[spend] {reason} - stopping Claude")
+            control.set_stop(reason, kind="run_budget")
+            control.terminate_process(control.get_current_process())
+            break
+
+
 def weekly_gate(budget, cached, max_age, allow_unknown):
     """Check whether another session may start.
 
@@ -115,6 +147,8 @@ def weekly_gate(budget, cached, max_age, allow_unknown):
             None,
         )
 
+    if budget.ledger:
+        budget.ledger.observe(usage)
     budget.plan(usage)
     allowed, reason = budget.check(usage)
     return allowed, reason, usage
@@ -280,7 +314,14 @@ def run(
 
         logger.info(f"Running: {' '.join(cmd)}")
 
-        session = run_session(cmd, structured=structured)
+        ledger = budget.ledger
+        if ledger:
+            ledger.session(True)
+        try:
+            session = run_session(cmd, structured=structured, ledger=ledger)
+        finally:
+            if ledger:
+                ledger.session(False)
         if session.session_id:
             session_id = session.session_id
         if session.usage:

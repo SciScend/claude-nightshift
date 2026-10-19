@@ -21,6 +21,7 @@ __all__ = [
     "load_cost_samples",
     "save_cost_samples",
     "max_windows_arg",
+    "spend_arg",
     "median",
 ]
 
@@ -73,6 +74,21 @@ def max_windows_arg(value):
     return count
 
 
+def spend_arg(value):
+    """Parse --spend: a share of the weekly pool in percent, or 'auto'."""
+    if str(value).strip().lower() == "auto":
+        return "auto"
+    try:
+        pct = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--spend takes a percentage or 'auto', got {value!r}"
+        ) from None
+    if not 0 < pct <= 100:
+        raise argparse.ArgumentTypeError("--spend must be above 0 and at most 100")
+    return pct
+
+
 def median(values):
     """Median of a list, or None if empty. Robust to the odd runaway session."""
     ordered = sorted(values)
@@ -122,13 +138,17 @@ def save_cost_samples(samples) -> None:
 class Budget:
     """How much of the weekly pool a single run may consume.
 
-    Three independent rules, all checked before a session starts:
+    Four independent rules, all checked before a session starts:
 
       1. Threshold    — never cross ``--threshold``. Always on.
       2. Run ceiling  — with ``--max-windows auto``, this run gets only the share
                         of the remaining pool that its ``--horizon`` is worth, so
                         one long task cannot eat the whole week.
       3. Window count — stop after ``--max-windows`` five-hour windows.
+      4. Spend        - with ``--spend``, stop once this run's own share of the
+                        weekly pool (see :mod:`claude_nightshift.ledger`) reaches
+                        the cap. ``auto`` splits what is left below the
+                        threshold evenly between ``--spend-share`` runs.
 
     Rules 2 and 3 need to know what one full 5-hour window costs in weekly
     percent. That is measured, not guessed: the weekly figure is read before and
@@ -136,8 +156,13 @@ class Budget:
     kept in the state file so later runs start out calibrated.
     """
 
-    def __init__(self, threshold, max_windows=None, horizon=None, predictive=False):
+    def __init__(self, threshold, max_windows=None, horizon=None, predictive=False,
+                 spend=None, spend_share=1, ledger=None):
         self.threshold = threshold
+        self.requested_spend = spend  # float, "auto", or None
+        self.spend_cap = spend if isinstance(spend, (int, float)) else None
+        self.spend_share = max(1, int(spend_share or 1))
+        self.ledger = ledger
         self.horizon = horizon or 12 * 3600
         self.requested_windows = max_windows  # int, "auto", or None
         self.max_windows = None if max_windows == "auto" else max_windows
@@ -168,6 +193,16 @@ class Budget:
         if self._planned or usage is None or usage.weekly_pct is None:
             return
         self._planned = True
+
+        if self.requested_spend == "auto":
+            left = max(0.0, self.threshold - usage.weekly_pct)
+            self.spend_cap = round(left / self.spend_share, 2)
+            logger.info(
+                f"  Spend budget  : {self.spend_cap:.1f}% of the weekly pool "
+                f"({left:.1f}% left below the threshold, split {self.spend_share} way(s))"
+            )
+            if self.ledger:
+                self.ledger.set_cap(self.spend_cap)
 
         if self.requested_windows != "auto":
             return
@@ -231,6 +266,15 @@ class Budget:
                 f"{self.run_ceiling:.1f}%"
             )
 
+        if self.spend_cap is not None and self.ledger:
+            spent = self.ledger.spent
+            if spent >= self.spend_cap:
+                self.stop_kind = "run_budget"
+                return False, (
+                    f"spend budget used - this run spent {spent:.1f}% of the "
+                    f"weekly pool, its budget is {self.spend_cap:.1f}%"
+                )
+
         if self.predictive:
             projected = pct + self.window_cost
             if projected > self.run_ceiling:
@@ -249,6 +293,8 @@ class Budget:
         detail = f"7-day usage {pct:.1f}%, {name} {self.run_ceiling:.1f}%"
         if self.max_windows is not None:
             detail += f", window {self.windows_used + 1}/{self.max_windows}"
+        if self.spend_cap is not None and self.ledger:
+            detail += f", spent {self.ledger.spent:.1f}% of {self.spend_cap:.1f}%"
         return True, detail
 
     def note_window(self, before, after, duration=None) -> None:

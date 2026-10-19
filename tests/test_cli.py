@@ -163,6 +163,7 @@ def test_usage_json_prints_both_windows(monkeypatch, capsys):
         "five_hour_resets": 1700000000,
         "source": "test",
         "observed_at": 1.0,
+        "runs": {},
     }
 
 

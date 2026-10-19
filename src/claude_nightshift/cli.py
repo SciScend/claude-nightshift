@@ -10,12 +10,19 @@ import sys
 import threading
 
 from claude_nightshift import __version__, control
-from claude_nightshift.budget import DEFAULT_MIN_WINDOW_LEFT, Budget, max_windows_arg
+from claude_nightshift.budget import (
+    DEFAULT_MIN_WINDOW_LEFT,
+    Budget,
+    max_windows_arg,
+    spend_arg,
+)
+from claude_nightshift.ledger import Ledger, read_runs
 from claude_nightshift.logsetup import get_logger, setup_logging
 from claude_nightshift.runner import (
     SKIP_PERMISSIONS_FLAG,
     Outcome,
     run,
+    spend_watch_thread,
     watchdog_thread,
 )
 from claude_nightshift.status import set_status_file
@@ -44,6 +51,8 @@ EPILOG = """Examples:
   claude-nightshift -t 90 --effort medium "long refactor"
   claude-nightshift -w auto --horizon 20h "big refactor"
   claude-nightshift -w 2 "spend at most two 5h windows"
+  claude-nightshift --run-id a --spend 5 "spend at most 5% of the week"
+  claude-nightshift --run-id b --spend auto --spend-share 2 "one of two runs"
   claude-nightshift --resume
   claude-nightshift --usage-json
   claude-nightshift -- claude -p "task" --allowedTools Edit
@@ -52,6 +61,8 @@ The weekly threshold is checked before each session starts; a running
 session is never interrupted unless you pass --hard-stop.
 -w/--max-windows caps what a single run may spend; 'auto' spreads the
 remaining weekly budget evenly over the time left before it resets.
+--spend caps this run's own share of the weekly pool, also while other
+runs share it; it is enforced during a session too.
 Usage figures are read from Claude's own stream, then the OAuth usage
 endpoint, then cclimits — none of them cost tokens.
 
@@ -60,7 +71,7 @@ Exit codes:
   1    failed: Claude error or retries exhausted
   2    usage error (bad arguments)
   3    weekly limit: --threshold reached, no budget left this week
-  4    run budget spent (-w N or -w auto), task not finished yet
+  4    run budget spent (-w N, -w auto or --spend), task not finished yet
   5    weekly usage could not be read, no session started
   130  interrupted
 """
@@ -96,6 +107,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Cap this run at N five-hour windows, so one task cannot "
                              "spend the whole week. 'auto' derives N from the weekly "
                              "budget left and --horizon (default: no cap)")
+    parser.add_argument("--run-id", type=str, default=None, metavar="ID",
+                        help="Name this run in the shared ledger "
+                             "(~/.claude/nightshift-ledger.json), which splits the "
+                             "weekly usage between runs that are going at the same "
+                             "time. Needed for --spend")
+    parser.add_argument("--spend", type=spend_arg, default=None, metavar="PCT|auto",
+                        help="Stop once this run has spent PCT%% of the weekly pool, "
+                             "counting only its own share when several runs go at "
+                             "once. Stops a running session too. 'auto' gives it an "
+                             "even share of what is left below --threshold "
+                             "(see --spend-share)")
+    parser.add_argument("--spend-share", type=int, default=1, metavar="N",
+                        help="With --spend auto: how many runs share what is left "
+                             "below --threshold (default: 1)")
+    parser.add_argument("--spend-interval", type=int, default=120, metavar="SEC",
+                        help="How often --spend is checked during a session "
+                             "(default: 120)")
     parser.add_argument("--horizon", type=parse_duration, default=12 * 3600,
                         metavar="DURATION",
                         help="How long you are leaving nightshift unattended, e.g. 20h, "
@@ -181,8 +209,8 @@ def load_task_file(path):
     return text
 
 
-def usage_as_json(usage):
-    """The ``--usage-json`` document for a Usage snapshot."""
+def usage_as_json(usage, runs=None):
+    """The ``--usage-json`` document for a Usage snapshot and the ledger's runs."""
     return json.dumps({
         "weekly_pct": usage.weekly_pct,
         "weekly_resets": usage.weekly_resets,
@@ -190,6 +218,7 @@ def usage_as_json(usage):
         "five_hour_resets": usage.five_hour_resets,
         "source": usage.source,
         "observed_at": usage.observed_at,
+        "runs": runs or {},
     })
 
 
@@ -198,7 +227,7 @@ def print_usage_json() -> int:
     if usage is None or usage.weekly_pct is None:
         print(json.dumps({"error": "usage could not be read"}))
         return int(Outcome.USAGE_UNKNOWN)
-    print(usage_as_json(usage))
+    print(usage_as_json(usage, read_runs()))
     return 0
 
 
@@ -249,6 +278,12 @@ def log_banner(args, budget, claude_cmd) -> None:
     logger.info("Starting claude-nightshift")
     logger.info(f"  Command       : {' '.join(claude_cmd)}")
     logger.info(f"  Weekly gate   : start a session only below {args.threshold}%")
+    if args.run_id:
+        logger.info(f"  Run id        : {args.run_id}")
+    if args.spend == "auto":
+        logger.info(f"  Spend budget  : auto, split {args.spend_share} way(s)")
+    elif args.spend:
+        logger.info(f"  Spend budget  : {args.spend:g}% of the weekly pool")
     if args.max_windows == "auto":
         logger.info(f"  Window budget : auto, over a {args.horizon / 3600:.0f}h horizon")
     elif args.max_windows:
@@ -295,6 +330,11 @@ def main(argv=None) -> int:
     if args.usage_json:
         return print_usage_json()
 
+    if args.spend is not None and not args.run_id:
+        parser.error("--spend needs --run-id")
+    if args.spend_share < 1:
+        parser.error("--spend-share must be at least 1")
+
     set_status_file(args.status_file)
 
     if args.task_file is not None:
@@ -325,11 +365,15 @@ def main(argv=None) -> int:
     if log_path:
         logger.info(f"Logging to {log_path}")
 
+    ledger = Ledger(args.run_id) if args.run_id else None
     budget = Budget(
         args.threshold,
         max_windows=args.max_windows,
         horizon=args.horizon,
         predictive=args.no_overshoot,
+        spend=args.spend,
+        spend_share=args.spend_share,
+        ledger=ledger,
     )
 
     log_banner(args, budget, claude_cmd)
@@ -341,19 +385,33 @@ def main(argv=None) -> int:
             daemon=True,
         ).start()
 
+    if ledger:
+        ledger.start(budget.spend_cap)
+    if ledger and args.spend is not None:
+        threading.Thread(
+            target=spend_watch_thread,
+            args=(budget, args.spend_interval),
+            daemon=True,
+        ).start()
+
     install_sigint_handler()
 
-    outcome = run(
-        claude_cmd,
-        budget,
-        max_retries=args.max_retries,
-        compress_after=args.compress_after,
-        base_flags=base_flags,
-        structured=structured,
-        usage_max_age=args.usage_max_age,
-        allow_unknown=args.allow_unknown_usage,
-        min_window_left=args.min_window_left,
-    )
+    try:
+        outcome = run(
+            claude_cmd,
+            budget,
+            max_retries=args.max_retries,
+            compress_after=args.compress_after,
+            base_flags=base_flags,
+            structured=structured,
+            usage_max_age=args.usage_max_age,
+            allow_unknown=args.allow_unknown_usage,
+            min_window_left=args.min_window_left,
+        )
+    finally:
+        if ledger:
+            ledger.finish()
+            logger.info(f"Spent by this run: {ledger.spent:.1f}% of the weekly pool")
     return int(outcome)
 
 

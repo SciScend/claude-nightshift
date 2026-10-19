@@ -15,6 +15,11 @@
   written (default `.nightshift-status.md` in the working directory).
 - `--usage-json` prints the current 5-hour and 7-day usage and reset times as
   JSON and exits (`5` if usage cannot be read).
+- Several runs at once: `--run-id ID` records the run in a shared ledger
+  (`~/.claude/nightshift-ledger.json`) that splits the rise in weekly usage
+  between the runs by the tokens each used. `--spend PCT|auto` caps a run's own
+  share of the weekly pool, also during a session (exit `4`), and
+  `--spend-share N` splits `auto` between N runs. `--usage-json` lists the runs.
 
 ## 1.0.0 - unreleased
 

@@ -224,7 +224,7 @@ class Script:
         turns = iter(sessions)
         self.monkeypatch.setattr(runner, "fetch_usage", lambda *a, **k: next(gate))
 
-        def fake_run_session(cmd, structured=True):
+        def fake_run_session(cmd, structured=True, ledger=None):
             self.commands.append(cmd)
             return next(turns)
 

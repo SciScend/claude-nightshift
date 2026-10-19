@@ -130,8 +130,11 @@ def usage_from_rate_limit_event(event):
     )
 
 
-def run_session(cmd, structured=True) -> SessionResult:
-    """Launch one claude process, stream its output, and collect what we need."""
+def run_session(cmd, structured=True, ledger=None) -> SessionResult:
+    """Launch one claude process, stream its output, and collect what we need.
+
+    With a ``ledger``, the tokens of the session are counted towards this run.
+    """
     session = SessionResult()
     started_at = time.time()
 
@@ -183,10 +186,17 @@ def run_session(cmd, structured=True) -> SessionResult:
             usage = usage_from_rate_limit_event(event)
             if usage:
                 session.usage = usage
+                if ledger:
+                    ledger.observe(usage)
             continue
 
         if etype == "result":
             session.result = event
+            if ledger:
+                ledger.result(event)
+
+        if etype == "assistant" and ledger:
+            ledger.message(event.get("message") or {})
 
         rendered = _render_stream_event(event)
         if rendered:
