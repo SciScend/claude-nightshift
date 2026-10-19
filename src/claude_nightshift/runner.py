@@ -54,6 +54,7 @@ class Outcome(enum.IntEnum):
     WEEKLY_LIMIT = 3  # --threshold reached: no budget left this week
     RUN_BUDGET = 4  # this run's window budget is spent, task unfinished
     USAGE_UNKNOWN = 5  # weekly usage could not be read, so no session was started
+    WEEK_ENDED = 6  # --week-of: the weekly limit reset, the new week is not this run's
     INTERRUPTED = 130  # stopped by the user
 
 
@@ -125,6 +126,19 @@ def spend_watch_thread(budget, interval) -> None:
             control.set_stop(reason, kind="run_budget")
             control.terminate_process(control.get_current_process())
             break
+
+
+def _week_ends_before(budget, usage, target) -> bool:
+    """Would waiting until ``target`` outlast this run's week (``--week-of``)?
+    Then there is nothing to wait for: the run would only stop when it wakes."""
+    ends = budget.week_ends(usage)
+    if not (ends and target and target >= ends):
+        return False
+    logger.warning(
+        f"The weekly limit resets at {fmt_epoch(ends)}, before the wait ends "
+        f"at {fmt_epoch(target)}; this run's week is over (--week-of)"
+    )
+    return True
 
 
 def weekly_gate(budget, cached, max_age, allow_unknown):
@@ -274,6 +288,8 @@ def run(
                 return Outcome.RUN_BUDGET
             if budget.stop_kind == "weekly_limit":
                 return Outcome.WEEKLY_LIMIT
+            if budget.stop_kind == "week_ended":
+                return Outcome.WEEK_ENDED
             if usage is None:
                 return Outcome.USAGE_UNKNOWN
             return Outcome.FAILED
@@ -285,6 +301,8 @@ def run(
             logger.warning(
                 f"{why}, but {deferrals} wait(s) did not clear it - starting anyway"
             )
+        elif not ready and _week_ends_before(budget, usage, reset_at):
+            return Outcome.WEEK_ENDED
         elif not ready:
             deferrals += 1
             wait_seconds = max(0.0, reset_at - time.time()) + RESET_GRACE_SECONDS
@@ -341,6 +359,10 @@ def run(
         if outcome == "limit":
             budget.note_window(window_start_usage, session.usage, session.duration)
             target = resolve_wait_target(session)
+            # The stream's reading may lack the weekly reset time; the gate's has it.
+            if (_week_ends_before(budget, session.usage, target)
+                    or _week_ends_before(budget, window_start_usage, target)):
+                return Outcome.WEEK_ENDED
             if target:
                 wait_seconds = max(0, target - time.time()) + RESET_GRACE_SECONDS
                 logger.warning(

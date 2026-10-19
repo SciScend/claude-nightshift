@@ -21,6 +21,9 @@
   share of the weekly pool, also during a session (exit `4`), and
   `--spend-share N` splits `auto` between N runs. `--usage-json` lists the runs,
   and `--runs-json` prints only them, without reading usage.
+- `--week-of EPOCH|now` keeps a run in one week: once the weekly limit has
+  reset after that moment, no session starts and the run exits `6` (week
+  ended), instead of spending the next week's pool.
 
 ## 1.0.0 - unreleased
 

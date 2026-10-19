@@ -7,11 +7,13 @@ import pytest
 from claude_nightshift.budget import (
     DEFAULT_WINDOW_COST,
     MAX_COST_SAMPLES,
+    WEEK,
     Budget,
     load_cost_samples,
     max_windows_arg,
     median,
     save_cost_samples,
+    week_of_arg,
 )
 from claude_nightshift.usage import Usage
 
@@ -105,3 +107,33 @@ def test_note_window_ignores_a_weekly_reset():
     budget.note_window(Usage(weekly_pct=60), Usage(weekly_pct=2))
     assert budget.windows_used == 1
     assert not budget.cost_is_measured
+
+
+def test_week_of_arg():
+    assert week_of_arg("1700000000") == 1700000000.0
+    assert week_of_arg("now") == pytest.approx(time.time(), abs=5)
+    with pytest.raises(argparse.ArgumentTypeError):
+        week_of_arg("tomorrow")
+
+
+def test_week_of_stops_once_the_weekly_limit_has_reset():
+    now = time.time()
+    budget = Budget(threshold=80, week_of=now - 3600)
+    # Still the week the run began in: the reset is ahead.
+    old_week = Usage(weekly_pct=63, weekly_resets=now + 20 * 3600)
+    assert budget.check(old_week)[0]
+    assert budget.week_ends(old_week) == old_week.weekly_resets
+    # The limit reset ten minutes ago; the next reset is a week after it.
+    new_week = Usage(weekly_pct=1, weekly_resets=now - 600 + WEEK)
+    allowed, reason = budget.check(new_week)
+    assert not allowed
+    assert budget.stop_kind == "week_ended"
+    assert "--week-of" in reason
+    assert budget.week_ends(new_week) is None
+
+
+def test_week_of_needs_a_reset_time_and_is_off_by_default():
+    now = time.time()
+    new_week = Usage(weekly_pct=1, weekly_resets=now - 600 + WEEK)
+    assert Budget(threshold=80).check(new_week)[0]
+    assert Budget(threshold=80, week_of=now - 3600).check(Usage(weekly_pct=1))[0]

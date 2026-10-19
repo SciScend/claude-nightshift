@@ -16,6 +16,7 @@ from claude_nightshift.budget import (
     DEFAULT_MIN_WINDOW_LEFT,
     FIVE_HOURS,
     MIN_WINDOW_SECONDS,
+    WEEK,
     Budget,
 )
 from claude_nightshift.runner import MAX_WINDOW_DEFERRALS, Outcome, run, window_ready
@@ -426,3 +427,49 @@ def test_user_stop_is_an_interrupt(script):
     outcome = run(["claude", "-p", "x"], Budget(70.0), max_retries=10)
     assert outcome == Outcome.INTERRUPTED
     assert int(outcome) == 130
+
+
+# --week-of
+
+
+def test_a_new_week_at_the_gate_ends_the_run(script):
+    script(usages=[usage(weekly=1.0, five=0.0, weekly_resets_in=WEEK - 600)], sessions=[])
+    budget = Budget(80.0, week_of=time.time() - 3600)
+    outcome = run(["claude", "-p", "x"], budget, max_retries=10)
+    assert outcome == Outcome.WEEK_ENDED
+    assert int(outcome) == 6
+    assert script.commands == []
+
+
+def test_the_old_week_still_runs(script):
+    script(usages=[usage(weekly=63.0, five=0.0, weekly_resets_in=20 * 3600)],
+           sessions=[success_session()])
+    budget = Budget(80.0, week_of=time.time() - 3600)
+    assert run(["claude", "-p", "x"], budget, max_retries=10) == Outcome.COMPLETED
+
+
+def test_no_wait_for_a_window_that_resets_after_the_week(script):
+    """5 hours spent at 07:00 with the weekly reset at 09:00: waiting until
+    12:00 would only end in the new week, so the run stops now."""
+    script(
+        usages=[usage(weekly=63.0, five=0.0, five_resets_in=FIVE_HOURS,
+                      weekly_resets_in=2 * 3600)],
+        sessions=[limit_session(4 * 3600, five_resets_in=5 * 3600)],
+    )
+    budget = Budget(80.0, week_of=time.time() - 3600)
+    outcome = run(["claude", "-p", "x"], budget, max_retries=10)
+    assert outcome == Outcome.WEEK_ENDED
+    assert script.sleeps == []
+
+
+def test_no_deferral_past_the_weekly_reset(script):
+    script(
+        usages=[usage(weekly=63.0, five=100.0, five_resets_in=3 * 3600,
+                      weekly_resets_in=3600)],
+        sessions=[],
+    )
+    budget = Budget(80.0, week_of=time.time() - 3600)
+    outcome = run(["claude", "-p", "x"], budget, max_retries=10)
+    assert outcome == Outcome.WEEK_ENDED
+    assert script.sleeps == []
+    assert script.commands == []

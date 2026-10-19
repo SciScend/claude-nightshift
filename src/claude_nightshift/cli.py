@@ -15,6 +15,7 @@ from claude_nightshift.budget import (
     Budget,
     max_windows_arg,
     spend_arg,
+    week_of_arg,
 )
 from claude_nightshift.ledger import Ledger, read_runs
 from claude_nightshift.logsetup import get_logger, setup_logging
@@ -26,7 +27,7 @@ from claude_nightshift.runner import (
     watchdog_thread,
 )
 from claude_nightshift.status import set_status_file
-from claude_nightshift.timeutil import parse_duration
+from claude_nightshift.timeutil import fmt_epoch, parse_duration
 from claude_nightshift.usage import fetch_usage
 
 __all__ = [
@@ -53,6 +54,7 @@ EPILOG = """Examples:
   claude-nightshift -w 2 "spend at most two 5h windows"
   claude-nightshift --run-id a --spend 5 "spend at most 5% of the week"
   claude-nightshift --run-id b --spend auto --spend-share 2 "one of two runs"
+  claude-nightshift --week-of now "stop at the weekly reset"
   claude-nightshift --resume
   claude-nightshift --usage-json
   claude-nightshift --runs-json
@@ -64,6 +66,8 @@ session is never interrupted unless you pass --hard-stop.
 remaining weekly budget evenly over the time left before it resets.
 --spend caps this run's own share of the weekly pool, also while other
 runs share it; it is enforced during a session too.
+--week-of stops the run when the weekly limit resets, so it does not go on
+spending the next week's pool.
 Usage figures are read from Claude's own stream, then the OAuth usage
 endpoint, then cclimits — none of them cost tokens.
 
@@ -74,6 +78,7 @@ Exit codes:
   3    weekly limit: --threshold reached, no budget left this week
   4    run budget spent (-w N, -w auto or --spend), task not finished yet
   5    weekly usage could not be read, no session started
+  6    the week ended: the weekly limit reset after --week-of
   130  interrupted
 """
 
@@ -125,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spend-interval", type=int, default=120, metavar="SEC",
                         help="How often --spend is checked during a session "
                              "(default: 120)")
+    parser.add_argument("--week-of", type=week_of_arg, default=None,
+                        metavar="EPOCH|now",
+                        help="The run belongs to the week that was current at this "
+                             "moment (unix seconds, or 'now'): once the weekly limit "
+                             "resets after it, start no session and exit 6, instead "
+                             "of spending the next week. A session that is running "
+                             "at the reset is not cut short (default: off)")
     parser.add_argument("--horizon", type=parse_duration, default=12 * 3600,
                         metavar="DURATION",
                         help="How long you are leaving nightshift unattended, e.g. 20h, "
@@ -289,6 +301,9 @@ def log_banner(args, budget, claude_cmd) -> None:
         logger.info(f"  Spend budget  : auto, split {args.spend_share} way(s)")
     elif args.spend:
         logger.info(f"  Spend budget  : {args.spend:g}% of the weekly pool")
+    if args.week_of is not None:
+        logger.info(f"  Week          : the one current at {fmt_epoch(args.week_of)}; "
+                    f"stop when the weekly limit resets")
     if args.max_windows == "auto":
         logger.info(f"  Window budget : auto, over a {args.horizon / 3600:.0f}h horizon")
     elif args.max_windows:
@@ -382,6 +397,7 @@ def main(argv=None) -> int:
         spend=args.spend,
         spend_share=args.spend_share,
         ledger=ledger,
+        week_of=args.week_of,
     )
 
     log_banner(args, budget, claude_cmd)

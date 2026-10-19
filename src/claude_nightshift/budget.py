@@ -8,10 +8,12 @@ import os
 import time
 
 from claude_nightshift.logsetup import get_logger
+from claude_nightshift.timeutil import fmt_epoch
 
 __all__ = [
     "Budget",
     "FIVE_HOURS",
+    "WEEK",
     "DEFAULT_MIN_WINDOW_LEFT",
     "MAX_START_UTIL_FOR_SAMPLE",
     "MIN_WINDOW_SECONDS",
@@ -22,12 +24,14 @@ __all__ = [
     "save_cost_samples",
     "max_windows_arg",
     "spend_arg",
+    "week_of_arg",
     "median",
 ]
 
 logger = get_logger(__name__)
 
 FIVE_HOURS = 5 * 3600
+WEEK = 7 * 24 * 3600
 MAX_COST_SAMPLES = 20
 
 # Fallback used only until the first full window has been measured.
@@ -89,6 +93,18 @@ def spend_arg(value):
     return pct
 
 
+def week_of_arg(value):
+    """Parse --week-of: unix epoch seconds, or 'now'."""
+    if str(value).strip().lower() == "now":
+        return time.time()
+    try:
+        return float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--week-of takes unix epoch seconds or 'now', got {value!r}"
+        ) from None
+
+
 def median(values):
     """Median of a list, or None if empty. Robust to the odd runaway session."""
     ordered = sorted(values)
@@ -138,7 +154,7 @@ def save_cost_samples(samples) -> None:
 class Budget:
     """How much of the weekly pool a single run may consume.
 
-    Four independent rules, all checked before a session starts:
+    Five independent rules, all checked before a session starts:
 
       1. Threshold    — never cross ``--threshold``. Always on.
       2. Run ceiling  — with ``--max-windows auto``, this run gets only the share
@@ -149,6 +165,9 @@ class Budget:
                         weekly pool (see :mod:`claude_nightshift.ledger`) reaches
                         the cap. ``auto`` splits what is left below the
                         threshold evenly between ``--spend-share`` runs.
+      5. Week         - with ``--week-of``, stop once the weekly limit has reset
+                        after that moment, so the run does not go on into the
+                        next week's pool.
 
     Rules 2 and 3 need to know what one full 5-hour window costs in weekly
     percent. That is measured, not guessed: the weekly figure is read before and
@@ -157,8 +176,9 @@ class Budget:
     """
 
     def __init__(self, threshold, max_windows=None, horizon=None, predictive=False,
-                 spend=None, spend_share=1, ledger=None):
+                 spend=None, spend_share=1, ledger=None, week_of=None):
         self.threshold = threshold
+        self.week_of = week_of  # unix epoch seconds, or None
         self.requested_spend = spend  # float, "auto", or None
         self.spend_cap = spend if isinstance(spend, (int, float)) else None
         self.spend_share = max(1, int(spend_share or 1))
@@ -176,7 +196,8 @@ class Budget:
         self.predictive = bool(predictive or max_windows is not None)
 
         # Why the last check() refused: "run_budget" (this run's share is spent:
-        # --max-windows or the auto run ceiling) or "weekly_limit" (--threshold).
+        # --max-windows or the auto run ceiling), "weekly_limit" (--threshold)
+        # or "week_ended" (--week-of).
         self.stop_kind = None
 
         self.samples = load_cost_samples()
@@ -244,10 +265,28 @@ class Budget:
             f"  Run ceiling   : stop before 7-day usage reaches {self.run_ceiling:.1f}%"
         )
 
+    def week_ends(self, usage):
+        """When the week this run belongs to ends: the weekly reset time while
+        that week is still current, else None. Only with ``--week-of``."""
+        if self.week_of is None or usage is None or not usage.weekly_resets:
+            return None
+        if usage.weekly_resets - WEEK > self.week_of:
+            return None
+        return usage.weekly_resets
+
     def check(self, usage):
         """May another session start? Returns ``(allowed, reason)``."""
         pct = usage.weekly_pct
         self.stop_kind = None
+
+        # The current week began after --week-of: the week this run was
+        # started for is over, and the new one is not its to spend.
+        if self.week_of is not None and usage.weekly_resets and not self.week_ends(usage):
+            self.stop_kind = "week_ended"
+            return False, (
+                f"the weekly limit reset at {fmt_epoch(usage.weekly_resets - WEEK)}, "
+                f"after this run's week began (--week-of)"
+            )
 
         if self.max_windows is not None and self.windows_used >= self.max_windows:
             self.stop_kind = "run_budget"

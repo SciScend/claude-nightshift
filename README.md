@@ -77,6 +77,7 @@ script (a queue, a cron job) why the run stopped:
 | `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
 | `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
 | `5` | Weekly usage could not be read, so no session was started (see `--allow-unknown-usage`). | Stop; it is an environment problem (login, network), not the task. |
+| `6` | The week ended: the weekly limit reset after `--week-of`. | Stop; start again when you want to spend the new week. |
 | `130` | Interrupted (Ctrl-C). | Stop. |
 
 > **Heads up:** every session runs with `--dangerously-skip-permissions`, because
@@ -134,6 +135,18 @@ when a session ends). It is an estimate: the figures come in whole percent,
 and your own use of Claude during a session is charged to the runs that are in
 one. `--usage-json` lists the runs with what each spent and its budget, and
 `--runs-json` lists only the runs, without reading usage.
+
+### Staying in one week
+
+`--threshold` compares against the account's weekly usage, which drops to
+about zero when the weekly limit resets. A run that is still going then would
+carry on into the new week. `--week-of EPOCH|now` ties the run to the week
+that was current at that moment: once the weekly limit has reset after it, no
+session starts and the run exits `6`. A wait for a 5-hour reset that falls
+after the weekly reset ends the run at once instead of sleeping. A session
+that is running at the weekly reset is not cut short. A wrapper that starts
+several runs passes all of them the same moment, so a run it starts after the
+reset stops at once too.
 
 ---
 

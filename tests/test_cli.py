@@ -34,6 +34,11 @@ def test_defaults():
     assert args.horizon == 12 * 3600
 
 
+def test_week_of_flag():
+    assert parse(["x"]).week_of is None
+    assert parse(["--week-of", "1700000000", "x"]).week_of == 1700000000.0
+
+
 def test_window_and_horizon_flags():
     args = parse(["-w", "auto", "--horizon", "20h", "x"])
     assert args.max_windows == "auto"
@@ -136,6 +141,7 @@ def test_missing_or_empty_task_file_is_a_usage_error(tmp_path, capsys, content):
         (Outcome.WEEKLY_LIMIT, 3),
         (Outcome.RUN_BUDGET, 4),
         (Outcome.USAGE_UNKNOWN, 5),
+        (Outcome.WEEK_ENDED, 6),
         (Outcome.INTERRUPTED, 130),
     ],
 )
