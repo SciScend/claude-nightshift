@@ -272,3 +272,10 @@ def test_usage_json_lists_the_runs(monkeypatch, capsys):
     assert cli.main(["--usage-json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["runs"]["t1"]["cap"] == 5
+
+
+def test_runs_json_reads_only_the_ledger(monkeypatch, capsys):
+    Ledger("t2").start(cap=2)
+    monkeypatch.setattr(cli, "fetch_usage", lambda attempts=3: pytest.fail("no network"))
+    assert cli.main(["--runs-json"]) == 0
+    assert json.loads(capsys.readouterr().out)["t2"]["cap"] == 2

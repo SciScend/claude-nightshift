@@ -132,7 +132,8 @@ the weekly figure rises, the rise is split between the runs by the tokens each
 used since the last rise, priced per model (replaced by Claude's exact cost
 when a session ends). It is an estimate: the figures come in whole percent,
 and your own use of Claude during a session is charged to the runs that are in
-one. `--usage-json` lists the runs with what each spent and its budget.
+one. `--usage-json` lists the runs with what each spent and its budget, and
+`--runs-json` lists only the runs, without reading usage.
 
 ---
 

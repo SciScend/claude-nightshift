@@ -19,7 +19,8 @@
   (`~/.claude/nightshift-ledger.json`) that splits the rise in weekly usage
   between the runs by the tokens each used. `--spend PCT|auto` caps a run's own
   share of the weekly pool, also during a session (exit `4`), and
-  `--spend-share N` splits `auto` between N runs. `--usage-json` lists the runs.
+  `--spend-share N` splits `auto` between N runs. `--usage-json` lists the runs,
+  and `--runs-json` prints only them, without reading usage.
 
 ## 1.0.0 - unreleased
 

@@ -55,6 +55,7 @@ EPILOG = """Examples:
   claude-nightshift --run-id b --spend auto --spend-share 2 "one of two runs"
   claude-nightshift --resume
   claude-nightshift --usage-json
+  claude-nightshift --runs-json
   claude-nightshift -- claude -p "task" --allowedTools Edit
 
 The weekly threshold is checked before each session starts; a running
@@ -164,6 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--usage-json", action="store_true",
                         help="Print the current 5-hour and 7-day usage as JSON and "
                              "exit (exit 5 if it cannot be read). Costs no tokens")
+    parser.add_argument("--runs-json", action="store_true",
+                        help="Print the runs in the shared ledger (what each spent of "
+                             "the weekly pool and its --spend budget) as JSON and "
+                             "exit. Reads only the local ledger")
     parser.add_argument("--max-turns", type=int, default=None, metavar="N",
                         help="Max agentic turns per Claude session. Hitting it ends the "
                              "session and nightshift resumes, it is not an error")
@@ -329,6 +334,9 @@ def main(argv=None) -> int:
 
     if args.usage_json:
         return print_usage_json()
+    if args.runs_json:
+        print(json.dumps(read_runs()))
+        return 0
 
     if args.spend is not None and not args.run_id:
         parser.error("--spend needs --run-id")
