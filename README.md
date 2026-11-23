@@ -77,7 +77,7 @@ script (a queue, a cron job) why the run stopped:
 | `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
 | `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
 | `5` | Weekly usage could not be read, so no session was started (see `--allow-unknown-usage`). | Stop; it is an environment problem (login, network), not the task. |
-| `6` | The week ended: the weekly limit reset after `--week-of`. | Stop; start again when you want to spend the new week. |
+| `6` | The week ended: the weekly limit reset after `--week-of` (with `--next-threshold`: reset a second time). | Stop; start again when you want to spend the new week. |
 | `130` | Interrupted (Ctrl-C). | Stop. |
 
 > **Heads up:** every session runs with `--dangerously-skip-permissions`, because
@@ -147,6 +147,21 @@ after the weekly reset ends the run at once instead of sleeping. A session
 that is running at the weekly reset is not cut short. A wrapper that starts
 several runs passes all of them the same moment, so a run it starts after the
 reset stops at once too.
+
+`--next-threshold PCT` (with `--week-of`) lets the run go on into the next
+week, with a limit of its own for that week:
+
+```bash
+# Up to all of this week, but at most 50% of the next one
+claude-nightshift -t 100 --week-of now --next-threshold 50 -f task.md
+```
+
+Reaching `--threshold` before the weekly reset is then a wait, not a stop:
+the run sleeps until the reset, as it does for a 5-hour one, and goes on in
+the new week until weekly usage reaches PCT (exit `3`). A wait for a 5-hour
+reset that falls in the next week is kept. With `--spend auto` the run's
+budget grows by its share of what is left below PCT in the new week. At the
+reset after that the run exits `6`. Not together with `--hard-stop`.
 
 ---
 

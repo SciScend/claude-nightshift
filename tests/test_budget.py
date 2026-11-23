@@ -13,6 +13,7 @@ from claude_nightshift.budget import (
     max_windows_arg,
     median,
     save_cost_samples,
+    threshold_arg,
     week_of_arg,
 )
 from claude_nightshift.usage import Usage
@@ -137,3 +138,77 @@ def test_week_of_needs_a_reset_time_and_is_off_by_default():
     new_week = Usage(weekly_pct=1, weekly_resets=now - 600 + WEEK)
     assert Budget(threshold=80).check(new_week)[0]
     assert Budget(threshold=80, week_of=now - 3600).check(Usage(weekly_pct=1))[0]
+
+
+# --next-threshold
+
+
+def test_next_threshold_arg():
+    assert threshold_arg("50") == 50.0
+    assert threshold_arg("0") == 0.0
+    for bad in ("101", "-1", "half"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            threshold_arg(bad)
+
+
+def test_next_threshold_needs_week_of():
+    assert Budget(threshold=80, next_threshold=50).next_threshold is None
+
+
+def test_threshold_reached_waits_for_the_reset_with_a_next_threshold():
+    now = time.time()
+    budget = Budget(threshold=100, week_of=now - 3600, next_threshold=50)
+    old_week = Usage(weekly_pct=100, weekly_resets=now + 6 * 3600)
+    allowed, reason = budget.check(old_week)
+    assert not allowed
+    assert budget.stop_kind == "wait_week"
+    assert budget.wait_until == old_week.weekly_resets
+    assert "--next-threshold" in reason
+    # The run may spend until the end of the next week.
+    assert budget.week_ends(old_week) == old_week.weekly_resets + WEEK
+
+
+def test_the_next_week_uses_the_next_threshold():
+    now = time.time()
+    budget = Budget(threshold=100, week_of=now - 3600, next_threshold=50)
+    new_week = Usage(weekly_pct=10, weekly_resets=now - 600 + WEEK)
+    assert budget.check(new_week)[0]
+    assert budget.in_next_week
+    assert budget.threshold == 50
+    assert budget.week_ends(new_week) == new_week.weekly_resets
+    # At the next threshold the run stops; there is no third week to wait for.
+    allowed, _ = budget.check(Usage(weekly_pct=50, weekly_resets=now - 600 + WEEK))
+    assert not allowed
+    assert budget.stop_kind == "weekly_limit"
+
+
+def test_the_week_after_the_next_one_ends_the_run():
+    now = time.time()
+    budget = Budget(threshold=100, week_of=now - WEEK - 3600, next_threshold=50)
+    later = Usage(weekly_pct=1, weekly_resets=now - 600 + WEEK)
+    allowed, _ = budget.check(later)
+    assert not allowed
+    assert budget.stop_kind == "week_ended"
+    assert budget.week_ends(later) is None
+
+
+def test_without_a_next_threshold_the_threshold_still_stops():
+    now = time.time()
+    budget = Budget(threshold=60, week_of=now - 3600)
+    budget.check(Usage(weekly_pct=60, weekly_resets=now + 3600))
+    assert budget.stop_kind == "weekly_limit"
+
+
+def test_an_auto_spend_budget_is_renewed_in_the_next_week(tmp_path):
+    from claude_nightshift.ledger import Ledger
+
+    now = time.time()
+    ledger = Ledger("a")
+    budget = Budget(threshold=100, week_of=now - 3600, next_threshold=50,
+                    spend="auto", spend_share=2, ledger=ledger)
+    ledger.start(None)
+    budget.plan(Usage(weekly_pct=40, weekly_resets=now + 3600))
+    assert budget.spend_cap == 30
+    budget.check(Usage(weekly_pct=10, weekly_resets=now - 600 + WEEK))
+    # Nothing spent yet: half of the 40% left below the new threshold.
+    assert budget.spend_cap == 20

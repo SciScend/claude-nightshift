@@ -25,6 +25,7 @@ __all__ = [
     "max_windows_arg",
     "spend_arg",
     "week_of_arg",
+    "threshold_arg",
     "median",
 ]
 
@@ -105,6 +106,19 @@ def week_of_arg(value):
         ) from None
 
 
+def threshold_arg(value):
+    """Parse a weekly threshold in percent (--next-threshold)."""
+    try:
+        pct = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"a threshold is a percentage, got {value!r}"
+        ) from None
+    if not 0 <= pct <= 100:
+        raise argparse.ArgumentTypeError("a threshold must be from 0 to 100")
+    return pct
+
+
 def median(values):
     """Median of a list, or None if empty. Robust to the odd runaway session."""
     ordered = sorted(values)
@@ -167,7 +181,11 @@ class Budget:
                         threshold evenly between ``--spend-share`` runs.
       5. Week         - with ``--week-of``, stop once the weekly limit has reset
                         after that moment, so the run does not go on into the
-                        next week's pool.
+                        next week's pool. With ``--next-threshold`` the run
+                        may also spend the week after that one, up to its own
+                        threshold: reaching ``--threshold`` in the first week
+                        waits for the weekly reset instead of stopping, and
+                        the run stops at the second reset.
 
     Rules 2 and 3 need to know what one full 5-hour window costs in weekly
     percent. That is measured, not guessed: the weekly figure is read before and
@@ -176,9 +194,15 @@ class Budget:
     """
 
     def __init__(self, threshold, max_windows=None, horizon=None, predictive=False,
-                 spend=None, spend_share=1, ledger=None, week_of=None):
+                 spend=None, spend_share=1, ledger=None, week_of=None,
+                 next_threshold=None):
         self.threshold = threshold
         self.week_of = week_of  # unix epoch seconds, or None
+        # The threshold for the week after the one of --week-of, or None.
+        self.next_threshold = next_threshold if week_of is not None else None
+        self.in_next_week = False
+        # With stop_kind "wait_week": when the weekly limit resets.
+        self.wait_until = None
         self.requested_spend = spend  # float, "auto", or None
         self.spend_cap = spend if isinstance(spend, (int, float)) else None
         self.spend_share = max(1, int(spend_share or 1))
@@ -196,8 +220,9 @@ class Budget:
         self.predictive = bool(predictive or max_windows is not None)
 
         # Why the last check() refused: "run_budget" (this run's share is spent:
-        # --max-windows or the auto run ceiling), "weekly_limit" (--threshold)
-        # or "week_ended" (--week-of).
+        # --max-windows or the auto run ceiling), "weekly_limit" (--threshold),
+        # "week_ended" (--week-of) or "wait_week" (--threshold reached in the
+        # first week with --next-threshold: wait for the weekly reset).
         self.stop_kind = None
 
         self.samples = load_cost_samples()
@@ -265,28 +290,98 @@ class Budget:
             f"  Run ceiling   : stop before 7-day usage reaches {self.run_ceiling:.1f}%"
         )
 
-    def week_ends(self, usage):
-        """When the week this run belongs to ends: the weekly reset time while
-        that week is still current, else None. Only with ``--week-of``."""
+    def week_index(self, usage):
+        """Which of the run's weeks ``usage`` is in: 0 the week of ``--week-of``,
+        1 the week after it, 2 any later one. None without ``--week-of`` or a
+        weekly reset time."""
         if self.week_of is None or usage is None or not usage.weekly_resets:
             return None
-        if usage.weekly_resets - WEEK > self.week_of:
+        began = usage.weekly_resets - WEEK
+        if began <= self.week_of:
+            return 0
+        if began - WEEK <= self.week_of:
+            return 1
+        return 2
+
+    def week_ends(self, usage):
+        """When the last week this run may spend ends: the week of
+        ``--week-of``, or the one after it with ``--next-threshold``. None once
+        that week is over, and without ``--week-of``."""
+        index = self.week_index(usage)
+        if index is None:
             return None
-        return usage.weekly_resets
+        if self.next_threshold is None:
+            return usage.weekly_resets if index == 0 else None
+        if index == 0:
+            return usage.weekly_resets + WEEK
+        return usage.weekly_resets if index == 1 else None
+
+    def enter_next_week(self, usage) -> None:
+        """Switch to ``--next-threshold`` once the weekly limit has reset, and
+        give an ``auto`` budget what is left below it in the new week."""
+        self.in_next_week = True
+        self.threshold = self.next_threshold
+        self.run_ceiling = self.next_threshold
+        pct = usage.weekly_pct or 0.0
+        logger.info(
+            f"[week] the weekly limit has reset; this run goes on in the new week "
+            f"up to {self.threshold:g}% (--next-threshold)"
+        )
+        if self.requested_spend == "auto":
+            spent = self.ledger.spent if self.ledger else 0.0
+            left = max(0.0, self.threshold - pct)
+            self.spend_cap = round(spent + left / self.spend_share, 2)
+            logger.info(
+                f"  Spend budget  : {self.spend_cap:.1f}% in all ({spent:.1f}% "
+                f"spent so far, {left:.1f}% left below the new threshold, split "
+                f"{self.spend_share} way(s))"
+            )
+            if self.ledger:
+                self.ledger.set_cap(self.spend_cap)
+        if self.requested_windows == "auto":
+            used = self.windows_used
+            self._planned = False
+            saved_spend, self.requested_spend = self.requested_spend, None
+            try:
+                self.plan(usage)
+            finally:
+                self.requested_spend = saved_spend
+            # The windows of the first week are already counted.
+            self.max_windows += used
+
+    def _wait_for_reset(self, usage, reason):
+        """Turn a stop at --threshold into a wait for the weekly reset, when
+        the run may go on into the next week."""
+        if self.next_threshold is None or self.in_next_week:
+            return False, reason
+        if self.week_index(usage) != 0:
+            return False, reason
+        self.stop_kind = "wait_week"
+        self.wait_until = usage.weekly_resets
+        return False, (
+            f"{reason}; waiting for the weekly reset at {fmt_epoch(usage.weekly_resets)}, "
+            f"then going on up to {self.next_threshold:g}% of the new week "
+            f"(--next-threshold)"
+        )
 
     def check(self, usage):
         """May another session start? Returns ``(allowed, reason)``."""
         pct = usage.weekly_pct
         self.stop_kind = None
+        self.wait_until = None
 
-        # The current week began after --week-of: the week this run was
-        # started for is over, and the new one is not its to spend.
-        if self.week_of is not None and usage.weekly_resets and not self.week_ends(usage):
+        # The run's last week is over: the new one is not its to spend.
+        index = self.week_index(usage)
+        last = 0 if self.next_threshold is None else 1
+        if index is not None and index > last:
             self.stop_kind = "week_ended"
+            flag = "--week-of" if self.next_threshold is None else "--week-of, --next-threshold"
             return False, (
                 f"the weekly limit reset at {fmt_epoch(usage.weekly_resets - WEEK)}, "
-                f"after this run's week began (--week-of)"
+                f"after the last week this run may spend ({flag})"
             )
+        if index == 1 and not self.in_next_week:
+            self.enter_next_week(usage)
 
         if self.max_windows is not None and self.windows_used >= self.max_windows:
             self.stop_kind = "run_budget"
@@ -300,10 +395,13 @@ class Budget:
 
         if pct >= self.run_ceiling:
             self.stop_kind = "weekly_limit" if pct >= self.threshold else refused_kind
-            return False, (
+            reason = (
                 f"7-day usage {pct:.1f}% is at or above the {name} "
                 f"{self.run_ceiling:.1f}%"
             )
+            if self.stop_kind == "weekly_limit":
+                return self._wait_for_reset(usage, reason)
+            return False, reason
 
         if self.spend_cap is not None and self.ledger:
             spent = self.ledger.spent
@@ -323,11 +421,14 @@ class Budget:
                     else " — estimated, refined after the first full window"
                 )
                 self.stop_kind = refused_kind
-                return False, (
+                reason = (
                     f"another window would reach ~{projected:.1f}% "
                     f"({pct:.1f}% + {self.window_cost:.1f}%{note}), past the "
                     f"{name} {self.run_ceiling:.1f}%"
                 )
+                if refused_kind == "weekly_limit":
+                    return self._wait_for_reset(usage, reason)
+                return False, reason
 
         detail = f"7-day usage {pct:.1f}%, {name} {self.run_ceiling:.1f}%"
         if self.max_windows is not None:

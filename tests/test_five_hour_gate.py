@@ -473,3 +473,67 @@ def test_no_deferral_past_the_weekly_reset(script):
     assert outcome == Outcome.WEEK_ENDED
     assert script.sleeps == []
     assert script.commands == []
+
+
+# --next-threshold
+
+
+def test_this_week_spent_waits_for_the_reset_and_goes_on(script):
+    """100% of this week is used with the reset in 6 hours: wait for it, then
+    go on in the new week instead of exiting 3."""
+    script(
+        usages=[
+            usage(weekly=100.0, five=0.0, weekly_resets_in=6 * 3600),
+            usage(weekly=0.0, five=0.0, weekly_resets_in=WEEK - 60),
+        ],
+        sessions=[success_session()],
+    )
+    budget = Budget(100.0, week_of=time.time() - 3600, next_threshold=50.0)
+    outcome = run(["claude", "-p", "x"], budget, max_retries=10)
+    assert outcome == Outcome.COMPLETED
+    assert script.sleeps[0] == pytest.approx(6 * 3600 + 30, abs=5)
+    assert budget.threshold == 50.0
+    assert len(script.commands) == 1
+
+
+def test_the_next_threshold_ends_the_run_in_the_new_week(script):
+    script(
+        usages=[usage(weekly=50.0, five=0.0, weekly_resets_in=WEEK - 3600)],
+        sessions=[],
+    )
+    budget = Budget(100.0, week_of=time.time() - 7200, next_threshold=50.0)
+    outcome = run(["claude", "-p", "x"], budget, max_retries=10)
+    assert outcome == Outcome.WEEKLY_LIMIT
+    assert script.commands == []
+
+
+def test_a_five_hour_wait_across_the_weekly_reset_is_kept(script):
+    """Unlike plain --week-of, a 5-hour wait that ends in the next week is
+    fine: the run may spend that week too."""
+    script(
+        usages=[
+            usage(weekly=63.0, five=100.0, five_resets_in=3 * 3600,
+                  weekly_resets_in=3600),
+            usage(weekly=1.0, five=0.0, five_resets_in=FIVE_HOURS,
+                  weekly_resets_in=WEEK - 2 * 3600),
+        ],
+        sessions=[success_session()],
+    )
+    budget = Budget(80.0, week_of=time.time() - 3600, next_threshold=30.0)
+    outcome = run(["claude", "-p", "x"], budget, max_retries=10)
+    assert outcome == Outcome.COMPLETED
+    assert len(script.sleeps) == 1
+
+
+def test_a_reading_that_lags_the_reset_is_read_again_later(script):
+    script(
+        usages=[
+            usage(weekly=100.0, five=0.0, weekly_resets_in=-60),
+            usage(weekly=2.0, five=0.0, weekly_resets_in=WEEK - 600),
+        ],
+        sessions=[success_session()],
+    )
+    # The stale reading still says the old week (it began before --week-of).
+    budget = Budget(100.0, week_of=time.time() - 3600, next_threshold=50.0)
+    assert run(["claude", "-p", "x"], budget, max_retries=10) == Outcome.COMPLETED
+    assert script.sleeps == [runner.FALLBACK_WAIT_SECONDS]

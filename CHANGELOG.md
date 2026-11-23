@@ -24,6 +24,10 @@
 - `--week-of EPOCH|now` keeps a run in one week: once the weekly limit has
   reset after that moment, no session starts and the run exits `6` (week
   ended), instead of spending the next week's pool.
+- `--next-threshold PCT` (with `--week-of`) lets a run go on into the next
+  week up to PCT% of it: reaching `--threshold` before the weekly reset waits
+  for the reset instead of exiting `3`, and the run exits `6` at the reset
+  after that.
 
 ## 1.0.0 - unreleased
 

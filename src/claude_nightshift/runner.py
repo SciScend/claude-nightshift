@@ -282,6 +282,23 @@ def run(
         if usage:
             cached_usage = usage
             window_start_usage = usage
+        if not allowed and budget.stop_kind == "wait_week":
+            # --next-threshold: this week's share is spent, the next week's is
+            # still to come. Wait for the weekly reset like for a 5-hour one.
+            wait_seconds = budget.wait_until - time.time() + RESET_GRACE_SECONDS
+            if wait_seconds <= RESET_GRACE_SECONDS:
+                # The reset time has passed but the reading does not show the
+                # new week yet; look again a little later.
+                wait_seconds = FALLBACK_WAIT_SECONDS
+            logger.warning(
+                f"Not starting another session yet: {reason} "
+                f"(~{wait_seconds / 3600:.1f} hours)."
+            )
+            if control.interruptible_sleep(wait_seconds):
+                logger.info(f"Stopped during wait: {control.stop_reason()}")
+                return _stopped_outcome()
+            cached_usage = None  # stale after the wait; force a fresh reading
+            continue
         if not allowed:
             logger.warning(f"🛑 Not starting another session: {reason}")
             if budget.stop_kind == "run_budget":

@@ -191,3 +191,20 @@ def test_status_file_flag_sets_the_status_file(monkeypatch, tmp_path):
     target = str(tmp_path / "s.md")
     assert main(["--status-file", target, "some task"]) == 0
     assert seen["path"] == target
+
+
+def test_next_threshold_flag():
+    assert parse(["x"]).next_threshold is None
+    assert parse(["--week-of", "now", "--next-threshold", "50", "x"]).next_threshold == 50.0
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["--next-threshold", "50", "x", "--dry-run"], "needs --week-of"),
+    (["--week-of", "now", "--next-threshold", "50", "--hard-stop", "x", "--dry-run"],
+     "--hard-stop"),
+])
+def test_next_threshold_usage_errors(capsys, argv, message):
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
