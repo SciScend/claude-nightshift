@@ -1,6 +1,6 @@
 import pytest
 
-from claude_nightshift import control, status
+from claude_nightshift import control, status, usage
 from claude_nightshift.budget import STATE_PATH_ENV
 from claude_nightshift.ledger import LEDGER_PATH_ENV
 
@@ -11,6 +11,7 @@ def isolated_state(tmp_path, monkeypatch):
     path = tmp_path / "nightshift-state.json"
     monkeypatch.setenv(STATE_PATH_ENV, str(path))
     monkeypatch.setenv(LEDGER_PATH_ENV, str(tmp_path / "nightshift-ledger.json"))
+    monkeypatch.setattr(usage, "_rate_limited_retry_after", None)
     control.reset()
     status.set_status_file(None)
     yield path

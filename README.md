@@ -76,7 +76,7 @@ script (a queue, a cron job) why the run stopped:
 | `2` | Usage error: bad arguments (argparse), unreadable or empty `--task-file`. | Fix the command. |
 | `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
 | `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
-| `5` | Weekly usage could not be read, so no session was started (see `--allow-unknown-usage`). | Stop; it is an environment problem (login, network), not the task. |
+| `5` | Weekly usage could not be read (a rate-limited endpoint after an hour of waiting), so no session was started (see `--allow-unknown-usage`). | Stop; it is an environment problem (login, network), not the task. |
 | `6` | The week ended: the weekly limit reset after `--week-of` (with `--next-threshold`: reset a second time). | Stop; start again when you want to spend the new week. |
 | `130` | Interrupted (Ctrl-C). | Stop. |
 
@@ -197,7 +197,8 @@ wait. Everything else is read out of the stream.
 > **Note:** neither the `rate_limit_event` stream fields nor the
 > `/api/oauth/usage` endpoint are documented by Anthropic, and either may change
 > without notice. If every source fails, nightshift refuses to start a session
-> rather than guess (pass `--allow-unknown-usage` to run anyway), and the 5-hour
+> rather than guess (pass `--allow-unknown-usage` to run anyway). A usage
+> endpoint that answers HTTP 429 is waited out for up to an hour first. The 5-hour
 > wait falls back to the reset time in Claude's limit message.
 
 ---

@@ -216,6 +216,7 @@ enforced — always the *lower* of your threshold and the auto allowance.
 | `another window would reach ~X%, past the ceiling Y%` | `--no-overshoot` declined to start a window that wouldn't fit. |
 | `5-hour window is X% spent … Waiting for it to reset` | Not a stop — a wait. The next window is worth more than the minutes left in this one. |
 | `... at or above the threshold Y%; waiting for the weekly reset` | Not a stop either: `--next-threshold` lets the run go on in the next week, up to its own limit. |
+| `the usage endpoint is rate limited (HTTP 429). Asking again in ~N minutes` | Not a stop: the endpoint is busy. The gate waits 5, 10, 15, 15 ... minutes (longer if the endpoint's `Retry-After` says so) and gives up after an hour. |
 | `weekly usage could not be determined` | Couldn't read usage; stopping rather than running blind. `--allow-unknown-usage` flips this. |
 
 Exit code is `0` only when the task actually completed. The other codes say
@@ -228,7 +229,7 @@ why the run stopped, so a script can decide what to do next:
 | `2` | Usage error: bad arguments (argparse), unreadable or empty `--task-file`. | Fix the command. |
 | `3` | Weekly limit: `--threshold` reached (also by `--hard-stop`). No budget left this week. | Stop; nothing else should start either. |
 | `4` | Run budget spent: the `-w N` window count or the `-w auto` run ceiling, task not finished. | Run it again later; it resumes from the status file. |
-| `5` | Weekly usage could not be read, so no session was started. | Stop; it is an environment problem (login, network), not the task. |
+| `5` | Weekly usage could not be read (a rate-limited endpoint after an hour of waiting), so no session was started. | Stop; it is an environment problem (login, network), not the task. |
 | `6` | The week ended: the weekly limit reset after `--week-of` (with `--next-threshold`: reset a second time). | Stop; start again when you want to spend the new week. |
 | `130` | Interrupted (Ctrl-C). | Stop. |
 

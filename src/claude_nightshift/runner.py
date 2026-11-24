@@ -16,11 +16,12 @@ from claude_nightshift.status import (
     status_instruction,
 )
 from claude_nightshift.timeutil import fmt_epoch
-from claude_nightshift.usage import fetch_usage
+from claude_nightshift.usage import fetch_usage, rate_limited_retry_after
 
 __all__ = [
     "Outcome",
     "weekly_gate",
+    "rate_limit_wait",
     "window_ready",
     "resolve_wait_target",
     "build_resume_command",
@@ -40,6 +41,12 @@ RESET_GRACE_SECONDS = 30
 # Consecutive pre-session waits before giving up on the 5-hour gate and running
 # anyway. Bounds the loop if a usage source is stuck reporting a spent window.
 MAX_WINDOW_DEFERRALS = 3
+# How long the gate keeps waiting for a usage endpoint that answers HTTP 429
+# before it gives up (exit 5), and the steps it waits in between: 5, 10, 15,
+# 15 ... minutes, or longer when the endpoint's Retry-After says so.
+RATE_LIMIT_PATIENCE = 3600
+RATE_LIMIT_STEP = 300
+RATE_LIMIT_MAX_STEP = 900
 
 
 class Outcome(enum.IntEnum):
@@ -168,6 +175,22 @@ def weekly_gate(budget, cached, max_age, allow_unknown):
     return allowed, reason, usage
 
 
+def rate_limit_wait(waited, waits, retry_after):
+    """Seconds to wait before the gate asks a rate-limited usage endpoint
+    again, or None once ``RATE_LIMIT_PATIENCE`` is used up.
+
+    ``waited`` is how long the gate has already waited for it, in ``waits``
+    waits; ``retry_after`` is what the endpoint asked for (0 if nothing).
+    A 429 is the endpoint being busy, not a sign that the budget is spent, so
+    it should not end a run that has hours of work ahead of it.
+    """
+    left = RATE_LIMIT_PATIENCE - waited
+    if left <= 0:
+        return None
+    step = min(RATE_LIMIT_MAX_STEP, RATE_LIMIT_STEP * (waits + 1))
+    return min(left, max(step, retry_after or 0))
+
+
 def window_ready(usage, min_left):
     """Is there enough of the 5-hour window left to be worth starting a session?
 
@@ -269,6 +292,8 @@ def run(
     session_id = None
     cached_usage = None
     window_start_usage = None
+    rate_limit_waited = 0.0  # time spent waiting out a rate-limited endpoint
+    rate_limit_waits = 0
 
     while retries < max_retries:
         if control.should_stop():
@@ -282,6 +307,31 @@ def run(
         if usage:
             cached_usage = usage
             window_start_usage = usage
+            rate_limit_waited, rate_limit_waits = 0.0, 0
+        if not allowed and usage is None:
+            # A rate-limited endpoint is busy, not broken: wait and ask again.
+            retry_after = rate_limited_retry_after()
+            wait = (None if retry_after is None else
+                    rate_limit_wait(rate_limit_waited, rate_limit_waits, retry_after))
+            if wait is not None:
+                rate_limit_waited += wait
+                rate_limit_waits += 1
+                logger.warning(
+                    f"Weekly usage could not be read: the usage endpoint is rate "
+                    f"limited (HTTP 429). Asking again in ~{wait / 60:.0f} minutes "
+                    f"(wait {rate_limit_waits}, gives up after "
+                    f"{RATE_LIMIT_PATIENCE / 60:.0f} minutes)."
+                )
+                if control.interruptible_sleep(wait):
+                    logger.info(f"Stopped during wait: {control.stop_reason()}")
+                    return _stopped_outcome()
+                cached_usage = None
+                continue
+            if retry_after is not None:
+                logger.warning(
+                    f"The usage endpoint stayed rate limited for "
+                    f"{RATE_LIMIT_PATIENCE / 60:.0f} minutes"
+                )
         if not allowed and budget.stop_kind == "wait_week":
             # --next-threshold: this week's share is spent, the next week's is
             # still to come. Wait for the weekly reset like for a 5-hour one.

@@ -31,6 +31,7 @@ __all__ = [
     "CREDENTIALS_PATH",
     "USAGE_ENDPOINT",
     "fetch_usage",
+    "rate_limited_retry_after",
     "fetch_usage_native",
     "fetch_usage_cclimits",
     "parse_7day_usage",
@@ -43,6 +44,11 @@ CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 USAGE_ENDPOINT = "https://api.anthropic.com/api/oauth/usage"
 
 RATE_LIMITED_MARKERS = ("429", "Rate limit", "Too Many Requests")
+
+# Set by fetch_usage when its last lookup failed on HTTP 429: the seconds the
+# endpoint asked to wait (Retry-After), or 0 when it did not say. None after a
+# lookup that succeeded or failed for another reason.
+_rate_limited_retry_after = None
 
 
 class Usage:
@@ -225,8 +231,12 @@ def fetch_usage(attempts=3):
 
     Returns Usage, or None if every source failed.
     """
+    global _rate_limited_retry_after
+    _rate_limited_retry_after = None
     last_error = None
+    retry_after = None
     for attempt in range(1, attempts + 1):
+        retry_after = None
         try:
             usage = fetch_usage_native()
             if usage:
@@ -236,6 +246,7 @@ def fetch_usage(attempts=3):
         except urllib.error.HTTPError as e:
             last_error = f"usage endpoint HTTP {e.code}"
             if e.code == 429:
+                retry_after = _retry_after_seconds(e.headers)
                 logger.warning("[usage] endpoint rate limited — backing off 60s")
                 if interruptible_sleep(60):
                     return None
@@ -259,4 +270,30 @@ def fetch_usage(attempts=3):
                 return None
 
     logger.warning(f"[usage] could not determine usage: {last_error}")
+    _rate_limited_retry_after = retry_after
     return None
+
+
+def rate_limited_retry_after():
+    """Did the last :func:`fetch_usage` fail because the endpoint rate limited
+    it (HTTP 429)? Then the seconds it asked to wait (``Retry-After``), or 0
+    when it did not say; None otherwise."""
+    return _rate_limited_retry_after
+
+
+def _retry_after_seconds(headers) -> float:
+    """``Retry-After`` in seconds: a number of seconds or an HTTP date. 0 when
+    missing or unreadable."""
+    value = (headers or {}).get("Retry-After")
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError):
+        return 0.0

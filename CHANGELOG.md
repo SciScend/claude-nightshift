@@ -28,6 +28,10 @@
   week up to PCT% of it: reaching `--threshold` before the weekly reset waits
   for the reset instead of exiting `3`, and the run exits `6` at the reset
   after that.
+- A usage endpoint that answers HTTP 429 no longer ends a run: the gate waits
+  5, 10, 15, 15 ... minutes (or what `Retry-After` asks) and asks again, for
+  up to an hour, before it exits `5`. A 429 at a 5-hour reset used to stop an
+  overnight run after three minutes.
 
 ## 1.0.0 - unreleased
 
